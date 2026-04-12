@@ -1,0 +1,863 @@
+from __future__ import annotations
+
+import json
+import re
+import uuid
+from datetime import date
+from typing import Any
+
+import bcrypt
+from django.db import connection, transaction
+from django.db.utils import IntegrityError
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+
+from .guest_identity import (
+    compute_identity_key,
+    ensure_guest_schema,
+    guest_phone_column_value,
+    identity_hostel_active_stay_overlap,
+    normalize_passport_series,
+    normalize_phone_digits,
+    resolve_guest_name_for_line,
+    upsert_guest,
+)
+from .id_ocr import extract_passport_from_data_url
+
+ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+LOGIN_RE = re.compile(r"^[a-z0-9._-]+$", re.I)
+
+
+def format_phone(raw: str) -> str:
+    if not raw:
+        return ""
+    s = str(raw).strip()
+    if s.startswith("+"):
+        s = s[1:]
+    d = re.sub(r"\D", "", s)
+    return f"+{d}" if d else ""
+
+
+def format_guest_contact(raw: str) -> str:
+    """Taxta: raqamli telefon → `format_phone`, aks holda (pasport seriyasi) matn."""
+    s = re.sub(r"\s+", "", (raw or "").strip())
+    if not s:
+        return ""
+    if re.fullmatch(r"\d{5,32}", s):
+        return format_phone(s)
+    return s[:40]
+
+
+def _json_error(msg: str, status: int = 400) -> JsonResponse:
+    return JsonResponse({"error": msg}, status=status)
+
+
+def _read_json(request) -> dict[str, Any] | None:
+    if not request.body:
+        return {}
+    try:
+        out = json.loads(request.body.decode())
+        return out if isinstance(out, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _today_iso() -> str:
+    return date.today().isoformat()
+
+
+def _resolve_room(hostel_name: str, room_code: str) -> dict[str, Any] | None:
+    with connection.cursor() as c:
+        c.execute(
+            """
+            SELECT r.id, r.bed_count, r.room_kind
+            FROM rooms r
+            JOIN hostels h ON h.id = r.hostel_id
+            WHERE h.name = %s AND r.code = %s
+            """,
+            [hostel_name, room_code],
+        )
+        row = c.fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "bed_count": row[1], "room_kind": row[2]}
+
+
+def _has_overlap(
+    room_id: int,
+    bed_index: int,
+    check_in: str,
+    nights: int,
+    exclude_booking_id: str | None = None,
+) -> bool:
+    with connection.cursor() as c:
+        c.execute(
+            """
+            SELECT 1
+            FROM bed_bookings b
+            WHERE b.room_id = %s AND b.bed_index = %s AND b.status = 'active'
+              AND (%s IS NULL OR b.id <> %s)
+              AND julianday(b.check_in_date) <= julianday(%s, '+' || (%s - 1) || ' days')
+              AND julianday(%s) <= julianday(b.check_in_date, '+' || (b.nights - 1) || ' days')
+            LIMIT 1
+            """,
+            [room_id, bed_index, exclude_booking_id, exclude_booking_id, check_in, nights, check_in],
+        )
+        return c.fetchone() is not None
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def health(_request):
+    return JsonResponse({"ok": True, "service": "swift-bookings-api"})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def board(request):
+    hostel = request.GET.get("hostel") or "Vodnik"
+    d = request.GET.get("date") or ""
+    date_iso = d if ISO_DATE.match(d) else _today_iso()
+
+    with connection.cursor() as c:
+        c.execute(
+            """
+            SELECT r.code, rc.status
+            FROM rooms r
+            JOIN hostels h ON h.id = r.hostel_id
+            LEFT JOIN room_cleaning rc ON rc.room_id = r.id
+            WHERE h.name = %s AND r.room_kind = 'dorm'
+            ORDER BY r.id
+            """,
+            [hostel],
+        )
+        cleaning_by: dict[str, str] = {}
+        for code, status in c.fetchall():
+            cleaning_by[code] = "clean" if status == "cleaned" else "dirty"
+
+        c.execute(
+            """
+            SELECT CAST(COALESCE(SUM(r.bed_count), 0) AS TEXT)
+            FROM rooms r
+            JOIN hostels h ON h.id = r.hostel_id
+            WHERE h.name = %s AND r.room_kind = 'dorm'
+            """,
+            [hostel],
+        )
+        total_beds = int(c.fetchone()[0] or 0)
+
+        c.execute(
+            """
+            SELECT CAST(COUNT(*) AS TEXT),
+                   CAST(COALESCE(SUM(CASE WHEN b.price > b.paid THEN b.price - b.paid ELSE 0 END), 0) AS TEXT),
+                   CAST(COALESCE(SUM(b.paid), 0) AS TEXT)
+            FROM bed_bookings b
+            JOIN rooms r ON r.id = b.room_id
+            JOIN hostels h ON h.id = r.hostel_id
+            WHERE h.name = %s AND r.room_kind = 'dorm' AND b.status = 'active'
+              AND b.check_in_date <= %s AND %s < date(b.check_in_date, '+' || b.nights || ' days')
+            """,
+            [hostel, date_iso, date_iso],
+        )
+        agg = c.fetchone()
+        occ_guests = int(agg[0] or 0)
+        debt_num = float(agg[1] or 0)
+        revenue_num = float(agg[2] or 0)
+
+        stats = {
+            "empty": max(0, total_beds - occ_guests),
+            "guests": occ_guests,
+            "debt": round(debt_num),
+            "revenue": round(revenue_num),
+        }
+
+        c.execute(
+            """
+            SELECT r.code, b.bed_index, b.guest_name, b.guest_phone, b.checked_in_by,
+                   CAST(b.id AS TEXT) AS booking_id,
+                   CAST(b.price AS TEXT) AS price,
+                   CAST(b.paid AS TEXT) AS paid,
+                   b.notes,
+                   b.nights,
+                   b.check_in_date AS check_in_date,
+                   b.photos,
+                   b.created_at AS created_at
+            FROM bed_bookings b
+            JOIN rooms r ON r.id = b.room_id
+            JOIN hostels h ON h.id = r.hostel_id
+            WHERE h.name = %s AND r.room_kind = 'dorm' AND b.status = 'active'
+              AND b.check_in_date <= %s AND %s < date(b.check_in_date, '+' || b.nights || ' days')
+            """,
+            [hostel, date_iso, date_iso],
+        )
+        bookings = []
+        for row in c.fetchall():
+            photos_raw = row[11]
+            if isinstance(photos_raw, list):
+                photos = photos_raw
+            elif isinstance(photos_raw, str):
+                try:
+                    j = json.loads(photos_raw)
+                    photos = j if isinstance(j, list) else []
+                except json.JSONDecodeError:
+                    photos = []
+            else:
+                photos = []
+            cin = row[10]
+            check_in_str = cin if isinstance(cin, str) else str(cin) if cin is not None else ""
+            created_raw = row[12]
+            checked_in_at = (
+                str(created_raw).strip()
+                if created_raw is not None and str(created_raw).strip()
+                else ""
+            )
+            bookings.append(
+                {
+                    "roomCode": row[0],
+                    "bedIndex": row[1],
+                    "guestName": row[2] or "",
+                    "guestPhone": format_guest_contact(row[3] or ""),
+                    "checkedInBy": row[4] or "",
+                    "bookingId": row[5],
+                    "price": row[6],
+                    "paid": row[7],
+                    "notes": row[8] or "",
+                    "nights": row[9],
+                    "checkInDate": check_in_str,
+                    "checkedInAt": checked_in_at,
+                    "photos": photos,
+                }
+            )
+
+    return JsonResponse(
+        {
+            "hostel": hostel,
+            "date": date_iso,
+            "stats": stats,
+            "bookings": bookings,
+            "cleaningByRoomCode": cleaning_by,
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET", "HEAD", "POST"])
+def users(request):
+    if request.method in ("GET", "HEAD"):
+        with connection.cursor() as c:
+            c.execute(
+                """
+                SELECT id, login, display_name, role, active, created_at
+                FROM users
+                ORDER BY active DESC, login ASC
+                """
+            )
+            rows = [
+                {
+                    "id": r[0],
+                    "login": r[1],
+                    "display_name": r[2],
+                    "role": r[3],
+                    "active": bool(r[4]),
+                    "created_at": r[5] or "",
+                }
+                for r in c.fetchall()
+            ]
+        return JsonResponse({"users": rows})
+
+    body = _read_json(request)
+    if body is None:
+        return _json_error("Invalid JSON")
+    login = (body.get("login") or "").strip()
+    display_name = (body.get("display_name") or "").strip()
+    password = body.get("password") or ""
+    role = body.get("role") or "staff"
+    if len(login) < 2 or len(login) > 64 or not LOGIN_RE.match(login):
+        return _json_error("Invalid login", 400)
+    if not display_name or len(display_name) > 120:
+        return _json_error("Invalid display_name", 400)
+    if len(password) < 6 or len(password) > 128:
+        return _json_error("Invalid password", 400)
+    if role not in ("admin", "staff"):
+        return _json_error("Invalid role", 400)
+    pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(10)).decode("ascii")
+    login_l = login.lower()
+    try:
+        with connection.cursor() as c:
+            c.execute(
+                "INSERT INTO users (login, display_name, password_hash, role) VALUES (%s, %s, %s, %s) RETURNING id",
+                [login_l, display_name, pw_hash, role],
+            )
+            new_id = c.fetchone()[0]
+    except IntegrityError:
+        return _json_error("Bu login allaqachon mavjud", 409)
+    return JsonResponse({"id": new_id, "login": login_l}, status=201)
+
+
+def _users_patch(request, user_id: int):
+    body = _read_json(request)
+    if body is None:
+        return _json_error("Invalid JSON")
+    sets: list[str] = []
+    vals: list[Any] = []
+    if "display_name" in body:
+        dn = (body.get("display_name") or "").strip()
+        if not dn or len(dn) > 120:
+            return _json_error("Invalid display_name", 400)
+        sets.append("display_name = %s")
+        vals.append(dn)
+    if "password" in body:
+        pw = body.get("password") or ""
+        if len(pw) < 6 or len(pw) > 128:
+            return _json_error("Invalid password", 400)
+        sets.append("password_hash = %s")
+        vals.append(bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt(10)).decode("ascii"))
+    if "role" in body:
+        role = body.get("role")
+        if role not in ("admin", "staff"):
+            return _json_error("Invalid role", 400)
+        sets.append("role = %s")
+        vals.append(role)
+    if "active" in body:
+        sets.append("active = %s")
+        vals.append(1 if body.get("active") else 0)
+    if not sets:
+        return JsonResponse({"ok": True, "updated": False})
+    vals.append(user_id)
+    with connection.cursor() as c:
+        c.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", vals)
+        if c.rowcount == 0:
+            return _json_error("Foydalanuvchi topilmadi", 404)
+    return JsonResponse({"ok": True, "updated": True})
+
+
+def _users_delete(_request, user_id: int):
+    with connection.cursor() as c:
+        c.execute("UPDATE users SET active = 0 WHERE id = %s AND active = 1", [user_id])
+        if c.rowcount == 0:
+            return _json_error("Faol foydalanuvchi topilmadi", 404)
+    return JsonResponse({"ok": True})
+
+
+@csrf_exempt
+@require_http_methods(["PATCH", "DELETE"])
+def user_detail(request, user_id: int):
+    if request.method == "PATCH":
+        return _users_patch(request, user_id)
+    return _users_delete(request, user_id)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def bookings_create(request):
+    body = _read_json(request)
+    if body is None:
+        return _json_error("Invalid JSON")
+    hostel = body.get("hostel") or ""
+    room_code = body.get("roomCode") or ""
+    check_in_date = body.get("checkInDate") or ""
+    nights = body.get("nights")
+    checked_in_by = body.get("checkedInBy") or ""
+    lines = body.get("lines")
+    if not hostel or not room_code or not ISO_DATE.match(check_in_date):
+        return _json_error("Invalid body", 400)
+    if not isinstance(nights, int) or nights < 1 or nights > 365:
+        nights = 1
+    if not isinstance(lines, list) or len(lines) < 1:
+        return _json_error("Invalid lines", 400)
+    if len(checked_in_by) > 120:
+        return _json_error("Invalid checkedInBy", 400)
+
+    room = _resolve_room(hostel, room_code)
+    if not room or room["room_kind"] != "dorm":
+        return _json_error("Room not found", 404)
+    bed_count = int(room["bed_count"])
+    room_id = int(room["id"])
+
+    identities_batch: list[str] = []
+    with connection.cursor() as c0:
+        ensure_guest_schema(c0)
+
+    for line in lines:
+        if not isinstance(line, dict):
+            return _json_error("Invalid line", 400)
+        bi = line.get("bedIndex")
+        if not isinstance(bi, int) or bi < 1:
+            return _json_error("Invalid bedIndex", 400)
+        if bi > bed_count:
+            return _json_error(f"Invalid bed index for room (max {bed_count})", 400)
+        phone_raw = str(line.get("guestPhone") or "")
+        passport_raw = str(line.get("guestPassportSeries") or "")
+        ik, id_err = compute_identity_key(phone_raw, passport_raw)
+        if id_err or not ik:
+            return _json_error(id_err or "Mehmon identifikatori noto‘g‘ri", 400)
+        ln = line.get("nights")
+        line_nights = int(ln) if isinstance(ln, int) and 1 <= ln <= 365 else nights
+        if _has_overlap(room_id, bi, check_in_date, line_nights, None):
+            return _json_error(f"Bed {bi} is already booked for these dates", 409)
+        if identity_hostel_active_stay_overlap(hostel, ik, check_in_date, line_nights):
+            return _json_error(
+                "Bu telefon yoki pasport bilan ushbu sanalarda allaqachon aktiv bron mavjud "
+                "(boshqa karavot yoki boshqa sana tanlang yoki avvalgi broni tugating).",
+                409,
+            )
+        identities_batch.append(ik)
+    if len(identities_batch) != len(set(identities_batch)):
+        return _json_error("Bitta bron so‘rovida bir xil mehmon (telefon/pasport) takrorlanmasin", 400)
+
+    inserted: list[str] = []
+    with transaction.atomic():
+        with connection.cursor() as c:
+            ensure_guest_schema(c)
+            for line in lines:
+                bi = int(line["bedIndex"])
+                ln = line.get("nights")
+                line_nights = int(ln) if isinstance(ln, int) and 1 <= ln <= 365 else nights
+                phone_raw = str(line.get("guestPhone") or "")
+                passport_raw = str(line.get("guestPassportSeries") or "")
+                ik, _ = compute_identity_key(phone_raw, passport_raw)
+                pn = normalize_phone_digits(phone_raw)
+                ps = normalize_passport_series(passport_raw)
+                photos = line.get("photos") if isinstance(line.get("photos"), list) else []
+                guest_name = resolve_guest_name_for_line(line, ik, pn)
+                gid = upsert_guest(c, ik, pn, ps, guest_name)
+                gp = guest_phone_column_value(ik, pn, ps)
+                bid = str(uuid.uuid4())
+                c.execute(
+                    """
+                    INSERT INTO bed_bookings (
+                      id, room_id, bed_index, check_in_date, nights, guest_name, guest_phone,
+                      guest_id, price, paid, notes, photos, checked_in_by, status
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active')
+                    RETURNING CAST(id AS TEXT)
+                    """,
+                    [
+                        bid,
+                        room_id,
+                        bi,
+                        check_in_date,
+                        line_nights,
+                        guest_name,
+                        gp,
+                        gid,
+                        str(line.get("price", "")),
+                        str(line.get("paid", "")),
+                        (line.get("notes") or "")[:2000],
+                        json.dumps(photos[:20]),
+                        (checked_in_by or "")[:120],
+                    ],
+                )
+                inserted.append(c.fetchone()[0])
+    return JsonResponse({"ids": inserted}, status=201)
+
+
+def _bookings_patch(request, booking_id: uuid.UUID):
+    body = _read_json(request)
+    if body is None:
+        return _json_error("Invalid JSON")
+    bid = str(booking_id)
+    with connection.cursor() as c:
+        ensure_guest_schema(c)
+        c.execute(
+            """
+            SELECT b.room_id, b.bed_index, b.check_in_date, b.nights, b.guest_name, b.guest_phone,
+                   b.guest_id, h.name
+            FROM bed_bookings b
+            JOIN rooms r ON r.id = b.room_id
+            JOIN hostels h ON h.id = r.hostel_id
+            WHERE b.id = %s AND b.status = 'active'
+            """,
+            [bid],
+        )
+        cur = c.fetchone()
+        if not cur:
+            return _json_error("Booking not found", 404)
+        (
+            room_id,
+            bed_index,
+            check_in_date,
+            cur_nights,
+            cur_guest_name,
+            cur_guest_phone,
+            cur_guest_id,
+            hostel_name,
+        ) = (
+            int(cur[0]),
+            int(cur[1]),
+            cur[2],
+            int(cur[3]),
+            str(cur[4] or ""),
+            str(cur[5] or ""),
+            cur[6],
+            str(cur[7] or ""),
+        )
+
+    next_check_in = body.get("checkInDate") or check_in_date
+    next_nights = int(body["nights"]) if isinstance(body.get("nights"), int) else cur_nights
+    if body.get("checkInDate") is not None or body.get("nights") is not None:
+        if body.get("checkInDate") is not None and not ISO_DATE.match(str(body["checkInDate"])):
+            return _json_error("Invalid checkInDate", 400)
+        if _has_overlap(room_id, bed_index, str(next_check_in), int(next_nights), bid):
+            return _json_error("Dates overlap another active booking", 409)
+
+    sets: list[str] = []
+    vals: list[Any] = []
+    if "guestName" in body:
+        sets.append("guest_name = %s")
+        vals.append(str(body["guestName"])[:200])
+    if "guestPhone" in body or "guestPassportSeries" in body:
+        rp = str(body["guestPhone"]) if "guestPhone" in body else ""
+        rpass = str(body["guestPassportSeries"]) if "guestPassportSeries" in body else ""
+        with connection.cursor() as c2:
+            if "guestPhone" not in body:
+                if cur_guest_id:
+                    c2.execute(
+                        "SELECT phone_normalized FROM guests WHERE id = %s",
+                        [int(cur_guest_id)],
+                    )
+                    rowp = c2.fetchone()
+                    rp = str(rowp[0] or "") if rowp else normalize_phone_digits(cur_guest_phone)
+                else:
+                    rp = normalize_phone_digits(cur_guest_phone)
+            if "guestPassportSeries" not in body:
+                if cur_guest_id:
+                    c2.execute(
+                        "SELECT passport_series FROM guests WHERE id = %s",
+                        [int(cur_guest_id)],
+                    )
+                    rowps = c2.fetchone()
+                    rpass = str(rowps[0] or "") if rowps else ""
+                elif len(normalize_phone_digits(cur_guest_phone)) < 9:
+                    rpass = normalize_passport_series(cur_guest_phone)
+        ik, id_err = compute_identity_key(rp, rpass)
+        if id_err or not ik:
+            return _json_error(id_err or "Mehmon identifikatori noto‘g‘ri", 400)
+        if identity_hostel_active_stay_overlap(
+            hostel_name, ik, str(next_check_in), int(next_nights), exclude_booking_id=bid
+        ):
+            return _json_error(
+                "Bu telefon yoki pasport bilan ushbu sanalarda boshqa aktiv bron bor.",
+                409,
+            )
+        gn = str(body["guestName"])[:200] if "guestName" in body else cur_guest_name
+        pn = normalize_phone_digits(rp)
+        ps = normalize_passport_series(rpass)
+        with connection.cursor() as c3:
+            gid = upsert_guest(c3, ik, pn, ps, gn or "Mehmon")
+            gp = guest_phone_column_value(ik, pn, ps)
+        sets.append("guest_phone = %s")
+        vals.append(gp)
+        sets.append("guest_id = %s")
+        vals.append(gid)
+    if "price" in body:
+        sets.append("price = %s")
+        vals.append(str(body["price"]))
+    if "paid" in body:
+        sets.append("paid = %s")
+        vals.append(str(body["paid"]))
+    if "notes" in body:
+        sets.append("notes = %s")
+        vals.append(str(body["notes"])[:2000])
+    if "nights" in body:
+        sets.append("nights = %s")
+        vals.append(int(body["nights"]))
+    if "checkInDate" in body:
+        sets.append("check_in_date = %s")
+        vals.append(str(body["checkInDate"]))
+    if "photos" in body and isinstance(body["photos"], list):
+        sets.append("photos = %s")
+        vals.append(json.dumps(body["photos"][:20]))
+    if "checkedInBy" in body:
+        sets.append("checked_in_by = %s")
+        vals.append(str(body["checkedInBy"])[:120])
+    if not sets:
+        return JsonResponse({"ok": True, "updated": False})
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    vals.append(bid)
+    with connection.cursor() as c:
+        c.execute(f"UPDATE bed_bookings SET {', '.join(sets)} WHERE id = %s", vals)
+        if "guestName" in body:
+            c.execute("SELECT guest_id FROM bed_bookings WHERE id = %s", [bid])
+            gr = c.fetchone()
+            if gr and gr[0]:
+                c.execute(
+                    """
+                    UPDATE guests SET guest_name = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    [str(body["guestName"])[:200], int(gr[0])],
+                )
+    return JsonResponse({"ok": True, "updated": True})
+
+
+def _bookings_delete(request, booking_id: uuid.UUID):
+    bid = str(booking_id)
+    raw = _read_json(request)
+    reason_label = ""
+    if isinstance(raw, dict):
+        reason_label = str(raw.get("cancelReason", "")).strip()[:500]
+    if not reason_label:
+        return _json_error("cancelReason majburiy (bekor sababi)", 400)
+    with transaction.atomic():
+        with connection.cursor() as c:
+            c.execute(
+                "SELECT notes FROM bed_bookings WHERE id = %s AND status = 'active'",
+                [bid],
+            )
+            row = c.fetchone()
+            if not row:
+                return _json_error("Active booking not found", 404)
+            old = str(row[0] or "")
+            extra = f"\nBekor sababi: {reason_label}"
+            new_notes = (old + extra)[:2000]
+            c.execute(
+                """
+                UPDATE bed_bookings
+                SET status = 'cancelled', notes = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = 'active'
+                """,
+                [new_notes, bid],
+            )
+            if c.rowcount == 0:
+                return _json_error("Active booking not found", 404)
+    return JsonResponse({"ok": True})
+
+
+@csrf_exempt
+@require_http_methods(["PATCH", "DELETE"])
+def booking_detail(request, booking_id: uuid.UUID):
+    if request.method == "PATCH":
+        return _bookings_patch(request, booking_id)
+    return _bookings_delete(request, booking_id)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def guests_extract_id_name(request):
+    """Passport/ID rasmdan maydonlar (PassportEye MRZ + zaxira Tesseract). Body: {\"image\": \"data:...\"}"""
+    body = _read_json(request)
+    if body is None:
+        return _json_error("Invalid JSON")
+    image = body.get("image")
+    if not isinstance(image, str) or not image.strip():
+        return _json_error("image (data URL string) majburiy", 400)
+    data, err = extract_passport_from_data_url(image.strip())
+    if err:
+        el = err.lower()
+        if "tesseract" in el or "pytesseract" in el:
+            return _json_error(err, 503)
+        return _json_error(err, 400)
+    payload: dict[str, Any] = {
+        "full_name": data.get("full_name") or "",
+        "document_number": data.get("document_number") or "",
+        "date_of_birth": data.get("date_of_birth") or "",
+        "expiry_date": data.get("expiry_date") or "",
+        "mrz_detected": bool(data.get("mrz_detected")),
+        "raw_text_preview": (data.get("raw_text_preview") or "")[:800],
+    }
+    for k in (
+        "mrz_source",
+        "mrz_type",
+        "mrz_valid_score",
+        "mrz_valid",
+        "country",
+        "nationality",
+        "sex",
+        "document_type",
+        "name_fallback",
+    ):
+        if k not in data:
+            continue
+        v = data[k]
+        if v is None or v == "":
+            continue
+        payload[k] = v
+    return JsonResponse(payload)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def guests_recent(request):
+    try:
+        limit = min(int(request.GET.get("limit") or 40), 200)
+    except ValueError:
+        limit = 40
+    with connection.cursor() as c:
+        ensure_guest_schema(c)
+        c.execute(
+            """
+            SELECT
+              latest.lk,
+              latest.guest_name,
+              latest.check_in_date,
+              CAST(latest.price AS TEXT),
+              CAST(latest.paid AS TEXT),
+              latest.notes,
+              latest.hostel,
+              latest.room_name,
+              COALESCE(
+                NULLIF(latest.g_phone, ''),
+                CASE WHEN latest.lk LIKE 'phone:%%' THEN substr(latest.lk, 7) ELSE '' END
+              ) AS out_phone,
+              COALESCE(
+                NULLIF(latest.g_pass, ''),
+                CASE WHEN latest.lk LIKE 'passport:%%' THEN substr(latest.lk, 10) ELSE '' END
+              ) AS out_pass
+            FROM (
+              SELECT
+                COALESCE(
+                  g.identity_key,
+                  'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
+                ) AS lk,
+                b.guest_name,
+                b.check_in_date,
+                b.price,
+                b.paid,
+                b.notes,
+                h.name AS hostel,
+                r.name AS room_name,
+                ifnull(g.phone_normalized, '') AS g_phone,
+                ifnull(g.passport_series, '') AS g_pass,
+                ROW_NUMBER() OVER (
+                  PARTITION BY COALESCE(
+                    g.identity_key,
+                    'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
+                  )
+                  ORDER BY b.check_in_date DESC, b.created_at DESC
+                ) AS rn
+              FROM bed_bookings b
+              JOIN rooms r ON r.id = b.room_id
+              JOIN hostels h ON h.id = r.hostel_id
+              LEFT JOIN guests g ON g.id = b.guest_id
+              WHERE b.status = 'active'
+            ) latest
+            WHERE latest.rn = 1
+            ORDER BY latest.check_in_date DESC
+            LIMIT %s
+            """,
+            [limit],
+        )
+        guests = []
+        for r in c.fetchall():
+            guests.append(
+                {
+                    "lookupKey": r[0] or "",
+                    "name": r[1] or "",
+                    "phone": r[8] or "",
+                    "passportSeries": r[9] or "",
+                    "lastVisit": r[2] or "",
+                    "price": float(r[3] or 0),
+                    "paid": float(r[4] or 0),
+                    "notes": (r[5] or "") or None,
+                    "hostel": r[6],
+                    "room": r[7],
+                }
+            )
+    return JsonResponse({"guests": guests})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def cleaning_list(request):
+    hostel = request.GET.get("hostel") or "Vodnik"
+    d = request.GET.get("date") or ""
+    date_iso = d if ISO_DATE.match(d) else _today_iso()
+
+    with connection.cursor() as c:
+        c.execute(
+            """
+            SELECT
+              r.code,
+              r.name,
+              r.bed_count,
+              r.room_kind,
+              rc.status,
+              rc.photos_before,
+              rc.photos_after,
+              (
+                SELECT CAST(COUNT(*) AS TEXT) FROM bed_bookings b
+                WHERE b.room_id = r.id AND b.status = 'active'
+                  AND b.check_in_date <= %s AND %s < date(b.check_in_date, '+' || b.nights || ' days')
+              ) AS occupied,
+              (
+                SELECT b.guest_name FROM bed_bookings b
+                WHERE b.room_id = r.id AND b.status = 'active'
+                  AND b.check_in_date <= %s AND %s < date(b.check_in_date, '+' || b.nights || ' days')
+                ORDER BY b.bed_index ASC
+                LIMIT 1
+              ) AS guest_name
+            FROM rooms r
+            JOIN hostels h ON h.id = r.hostel_id
+            LEFT JOIN room_cleaning rc ON rc.room_id = r.id
+            WHERE h.name = %s
+            ORDER BY r.room_kind DESC, r.id
+            """,
+            [date_iso, date_iso, date_iso, date_iso, hostel],
+        )
+        rooms = []
+        for row in c.fetchall():
+            pb, pa = row[5], row[6]
+
+            def _jarr(v: Any) -> list:
+                if isinstance(v, list):
+                    return v
+                if isinstance(v, str):
+                    try:
+                        j = json.loads(v)
+                        return j if isinstance(j, list) else []
+                    except json.JSONDecodeError:
+                        return []
+                return []
+
+            rooms.append(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "hostel": hostel,
+                    "guestName": row[8] or "",
+                    "status": "cleaned" if (row[4] or "dirty") == "cleaned" else "dirty",
+                    "type": "bathroom" if row[3] == "bathroom" else "room",
+                    "totalBeds": row[2],
+                    "occupiedBeds": int(row[7] or 0),
+                    "photosBefore": _jarr(pb),
+                    "photosAfter": _jarr(pa),
+                }
+            )
+    return JsonResponse({"hostel": hostel, "date": date_iso, "rooms": rooms})
+
+
+@csrf_exempt
+@require_http_methods(["PATCH"])
+def cleaning_patch(request, room_code: str):
+    body = _read_json(request)
+    if body is None:
+        return _json_error("Invalid JSON")
+    hostel = body.get("hostel") or ""
+    if not hostel:
+        return _json_error("hostel required", 400)
+    room = _resolve_room(hostel, room_code)
+    if not room:
+        return _json_error("Room not found", 404)
+    room_id = int(room["id"])
+    sets: list[str] = []
+    vals: list[Any] = []
+    if "status" in body:
+        st = body.get("status")
+        if st not in ("dirty", "cleaned"):
+            return _json_error("Invalid status", 400)
+        sets.append("status = %s")
+        vals.append(st)
+    if "photosBefore" in body and isinstance(body.get("photosBefore"), list):
+        sets.append("photos_before = %s")
+        vals.append(json.dumps(body["photosBefore"][:20]))
+    if "photosAfter" in body and isinstance(body.get("photosAfter"), list):
+        sets.append("photos_after = %s")
+        vals.append(json.dumps(body["photosAfter"][:20]))
+    if not sets:
+        return JsonResponse({"ok": True, "updated": False})
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    vals.append(room_id)
+    with connection.cursor() as c:
+        c.execute(f"UPDATE room_cleaning SET {', '.join(sets)} WHERE room_id = %s", vals)
+    return JsonResponse({"ok": True, "updated": True})
