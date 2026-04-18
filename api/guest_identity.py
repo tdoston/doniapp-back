@@ -125,8 +125,18 @@ def identity_hostel_active_stay_overlap(
     nights: int,
     exclude_booking_id: str | None = None,
 ) -> bool:
-    """Shu identifikator bilan filialda aktiv bron sanalari kesishadimi."""
-    legacy_phone = identity_key[6:] if identity_key.startswith("phone:") else None
+    """Shu identifikator bilan filialda aktiv bron sanalari kesishadimi.
+
+    Eski yozuvlar `guests` jadvalisiz bo‘lsa: `bed_bookings.guest_phone` ustuniga
+    qarab ham tekshiramiz (telefon raqami yoki hujjat seriyasi shu yerda saqlanadi).
+    """
+    legacy_value: str | None = None
+    if identity_key.startswith("phone:"):
+        legacy_value = identity_key[6:]
+    elif identity_key.startswith("doc:"):
+        legacy_value = identity_key[4:]
+    elif identity_key.startswith("passport:"):
+        legacy_value = identity_key[9:]
     with connection.cursor() as c:
         c.execute(
             """
@@ -150,8 +160,8 @@ def identity_hostel_active_stay_overlap(
                 exclude_booking_id,
                 exclude_booking_id,
                 identity_key,
-                legacy_phone,
-                legacy_phone,
+                legacy_value,
+                legacy_value,
                 check_in,
                 nights,
                 check_in,
