@@ -702,13 +702,21 @@ def guests_recent(request):
               ) AS out_phone,
               COALESCE(
                 NULLIF(latest.g_pass, ''),
-                CASE WHEN latest.lk LIKE 'passport:%%' THEN substr(latest.lk, 10) ELSE '' END
+                CASE WHEN latest.lk LIKE 'doc:%%' THEN substr(latest.lk, 5)
+                     WHEN latest.lk LIKE 'passport:%%' THEN substr(latest.lk, 10)
+                     ELSE '' END
               ) AS out_pass
             FROM (
               SELECT
                 COALESCE(
                   g.identity_key,
-                  'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
+                  CASE
+                    WHEN typeof(b.guest_phone) IN ('text','blob')
+                         AND length(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '')) >= 9
+                         AND replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '') GLOB '[0-9]*'
+                    THEN 'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
+                    ELSE 'doc:' || upper(trim(ifnull(b.guest_phone, '')))
+                  END
                 ) AS lk,
                 b.guest_name,
                 b.check_in_date,
@@ -722,7 +730,12 @@ def guests_recent(request):
                 ROW_NUMBER() OVER (
                   PARTITION BY COALESCE(
                     g.identity_key,
-                    'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
+                    CASE
+                      WHEN length(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '')) >= 9
+                           AND replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '') GLOB '[0-9]*'
+                      THEN 'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
+                      ELSE 'doc:' || upper(trim(ifnull(b.guest_phone, '')))
+                    END
                   )
                   ORDER BY b.check_in_date DESC, b.created_at DESC
                 ) AS rn
