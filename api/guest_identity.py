@@ -176,19 +176,26 @@ def guest_latest_name_by_identity(identity_key: str) -> str:
         row = c.fetchone()
         if row and str(row[0] or "").strip():
             return str(row[0]).strip()[:200]
+    legacy_value: str | None = None
     if identity_key.startswith("phone:"):
-        pn = identity_key[6:]
-        c.execute(
-            """
-            SELECT guest_name FROM bed_bookings
-            WHERE guest_phone = %s AND guest_id IS NULL
-            ORDER BY check_in_date DESC, created_at DESC LIMIT 1
-            """,
-            [pn],
-        )
-        row2 = c.fetchone()
-        if row2 and row2[0]:
-            return str(row2[0]).strip()[:200]
+        legacy_value = identity_key[6:]
+    elif identity_key.startswith("doc:"):
+        legacy_value = identity_key[4:]
+    elif identity_key.startswith("passport:"):
+        legacy_value = identity_key[9:]
+    if legacy_value:
+        with connection.cursor() as c2:
+            c2.execute(
+                """
+                SELECT guest_name FROM bed_bookings
+                WHERE guest_phone = %s AND guest_id IS NULL
+                ORDER BY check_in_date DESC, created_at DESC LIMIT 1
+                """,
+                [legacy_value],
+            )
+            row2 = c2.fetchone()
+            if row2 and row2[0]:
+                return str(row2[0]).strip()[:200]
     return ""
 
 
