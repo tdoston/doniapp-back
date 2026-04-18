@@ -18,23 +18,25 @@ def normalize_phone_digits(raw: str) -> str:
 
 def compute_identity_key(phone: str, passport_series: str) -> tuple[str | None, str | None]:
     """
-    Birlamchi identifikator: telefon (>=9 raqam) yoki pasport seriyasi (>=4 belgi).
+    Birlamchi identifikator: HUJJAT seriyasi (pasport yoki haydovchilik guvohnomasi, >=4 belgi).
+    Telefon — ixtiyoriy qo‘shimcha, unique uchun ishlatilmaydi.
+    Eski yozuvlar uchun: agar seriya bo‘lmasa va telefon (>=9 raqam) bo‘lsa — `phone:` kalitiga tushadi.
     Qaytaradi: (identity_key, xato_xabari).
     """
-    pn = normalize_phone_digits(phone)
     ps = normalize_passport_series(passport_series)
+    pn = normalize_phone_digits(phone)
+    if len(ps) >= 4:
+        return f"doc:{ps}", None
     if len(pn) >= 9:
         return f"phone:{pn}", None
-    if len(ps) >= 4:
-        return f"passport:{ps}", None
-    return None, "Telefon (kamida 9 raqam) yoki pasport seriyasi (kamida 4 belgi) kerak"
+    return None, "Hujjat seriyasi (pasport yoki haydovchilik guvohnomasi, kamida 4 belgi) kerak"
 
 
 def guest_phone_column_value(identity_key: str, phone_norm: str, passport_norm: str) -> str:
-    """`bed_bookings.guest_phone` — taxtada ko‘rinadi (telefon raqamlari yoki seriya)."""
-    if identity_key.startswith("phone:"):
-        return phone_norm[:32]
-    return passport_norm[:32]
+    """`bed_bookings.guest_phone` — taxtada ko‘rinadi (hujjat seriyasi yoki telefon)."""
+    if identity_key.startswith("doc:") or identity_key.startswith("passport:"):
+        return (passport_norm or phone_norm)[:32]
+    return (phone_norm or passport_norm)[:32]
 
 
 def ensure_guest_schema(cursor) -> None:
