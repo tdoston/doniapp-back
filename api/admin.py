@@ -135,10 +135,19 @@ class BedBookingAdmin(admin.ModelAdmin):
         "paid",
         "balance_display",
         "status",
+        "booking_kind",
+        "cancel_reason_short",
         "checked_in_by",
     )
     list_filter = (BookingWhenFilter, "status", "check_in_date")
-    search_fields = ("guest_name", "guest_phone", "id", "notes")
+    search_fields = (
+        "guest_name",
+        "guest_phone",
+        "id",
+        "notes",
+        "cancel_reason_bron",
+        "cancel_reason_checkin",
+    )
     raw_id_fields = ("room",)
     readonly_fields = (
         "id",
@@ -167,8 +176,19 @@ class BedBookingAdmin(admin.ModelAdmin):
                     "room",
                     "bed_index",
                     "status",
+                    "booking_kind",
                     "check_in_date",
                     "nights",
+                    "expected_arrival",
+                )
+            },
+        ),
+        (
+            "Bekor qilish jurnali",
+            {
+                "fields": (
+                    "cancel_reason_bron",
+                    "cancel_reason_checkin",
                 )
             },
         ),
@@ -260,6 +280,13 @@ class BedBookingAdmin(admin.ModelAdmin):
         if bal <= 0.009:
             return format_html('<span style="color:#15803d;font-weight:600">0</span>')
         return format_html('<span style="color:#b45309;font-weight:600">{:,.0f}</span>', bal)
+
+    @admin.display(description="Bekor sababi")
+    def cancel_reason_short(self, obj):
+        text = (obj.cancel_reason_checkin or "").strip() or (obj.cancel_reason_bron or "").strip()
+        if not text:
+            return "—"
+        return text if len(text) <= 70 else f"{text[:67]}..."
 
     @admin.display(description="Batafsil")
     def summary_panel(self, obj):

@@ -32,6 +32,13 @@ CREATE TABLE guests (
   phone_normalized TEXT NOT NULL DEFAULT '',
   passport_series TEXT NOT NULL DEFAULT '',
   guest_name TEXT NOT NULL DEFAULT '',
+  doc_full_name TEXT NOT NULL DEFAULT '',
+  doc_birth_date TEXT NOT NULL DEFAULT '',
+  doc_expiry_date TEXT NOT NULL DEFAULT '',
+  doc_citizenship TEXT NOT NULL DEFAULT '',
+  doc_number TEXT NOT NULL DEFAULT '',
+  doc_type TEXT NOT NULL DEFAULT '',
+  doc_extracted_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
   updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 );
@@ -53,6 +60,10 @@ CREATE TABLE bed_bookings (
   photos TEXT NOT NULL DEFAULT '[]',
   checked_in_by TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
+  booking_kind TEXT NOT NULL DEFAULT 'check_in' CHECK (booking_kind IN ('bron', 'check_in')),
+  expected_arrival TEXT NOT NULL DEFAULT '',
+  cancel_reason_bron TEXT NOT NULL DEFAULT '',
+  cancel_reason_checkin TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
   updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
 );
@@ -63,6 +74,8 @@ CREATE INDEX bed_bookings_active_idx ON bed_bookings (room_id, status, check_in_
 CREATE TABLE room_cleaning (
   room_id INTEGER PRIMARY KEY REFERENCES rooms (id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'dirty' CHECK (status IN ('dirty', 'cleaned')),
+  full_taken INTEGER NOT NULL DEFAULT 0 CHECK (full_taken IN (0, 1)),
+  full_taken_mode TEXT NOT NULL DEFAULT '' CHECK (full_taken_mode IN ('', 'check_in', 'bron')),
   photos_before TEXT NOT NULL DEFAULT '[]',
   photos_after TEXT NOT NULL DEFAULT '[]',
   updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)

@@ -29,6 +29,13 @@ class Guest(models.Model):
     phone_normalized = models.CharField(max_length=32, blank=True, default="")
     passport_series = models.CharField(max_length=64, blank=True, default="")
     guest_name = models.CharField(max_length=200, blank=True, default="")
+    doc_full_name = models.CharField(max_length=200, blank=True, default="")
+    doc_birth_date = models.CharField(max_length=10, blank=True, default="")
+    doc_expiry_date = models.CharField(max_length=10, blank=True, default="")
+    doc_citizenship = models.CharField(max_length=64, blank=True, default="")
+    doc_number = models.CharField(max_length=64, blank=True, default="")
+    doc_type = models.CharField(max_length=40, blank=True, default="")
+    doc_extracted_at = models.TextField(blank=True, default="")
     created_at = models.TextField(blank=True, default="")
     updated_at = models.TextField(blank=True, default="")
 
@@ -84,6 +91,10 @@ class BedBooking(models.Model):
     photos = models.TextField(default="[]")
     checked_in_by = models.CharField(max_length=200, blank=True, default="")
     status = models.CharField(max_length=20, default="active")
+    booking_kind = models.CharField(max_length=20, default="check_in")
+    expected_arrival = models.CharField(max_length=120, blank=True, default="")
+    cancel_reason_bron = models.TextField(blank=True, default="")
+    cancel_reason_checkin = models.TextField(blank=True, default="")
     created_at = models.TextField(blank=True, default="")
     updated_at = models.TextField(blank=True, default="")
 
@@ -100,6 +111,8 @@ class BedBooking(models.Model):
 class RoomCleaning(models.Model):
     room = models.OneToOneField(Room, models.CASCADE, db_column="room_id", primary_key=True, related_name="cleaning")
     status = models.CharField(max_length=20, default="dirty")
+    full_taken = models.BooleanField(default=False)
+    full_taken_mode = models.CharField(max_length=20, default="")
     photos_before = models.TextField(default="[]")
     photos_after = models.TextField(default="[]")
     updated_at = models.TextField(blank=True, default="")

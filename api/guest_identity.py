@@ -59,6 +59,22 @@ def ensure_guest_schema(cursor) -> None:
         cursor.execute("CREATE INDEX IF NOT EXISTS guests_identity_idx ON guests(identity_key)")
     else:
         cursor.execute("CREATE INDEX IF NOT EXISTS guests_identity_idx ON guests(identity_key)")
+        cursor.execute("PRAGMA table_info(guests)")
+        gcols = {row[1] for row in cursor.fetchall()}
+        if "doc_full_name" not in gcols:
+            cursor.execute("ALTER TABLE guests ADD COLUMN doc_full_name TEXT NOT NULL DEFAULT ''")
+        if "doc_birth_date" not in gcols:
+            cursor.execute("ALTER TABLE guests ADD COLUMN doc_birth_date TEXT NOT NULL DEFAULT ''")
+        if "doc_expiry_date" not in gcols:
+            cursor.execute("ALTER TABLE guests ADD COLUMN doc_expiry_date TEXT NOT NULL DEFAULT ''")
+        if "doc_citizenship" not in gcols:
+            cursor.execute("ALTER TABLE guests ADD COLUMN doc_citizenship TEXT NOT NULL DEFAULT ''")
+        if "doc_number" not in gcols:
+            cursor.execute("ALTER TABLE guests ADD COLUMN doc_number TEXT NOT NULL DEFAULT ''")
+        if "doc_type" not in gcols:
+            cursor.execute("ALTER TABLE guests ADD COLUMN doc_type TEXT NOT NULL DEFAULT ''")
+        if "doc_extracted_at" not in gcols:
+            cursor.execute("ALTER TABLE guests ADD COLUMN doc_extracted_at TEXT NOT NULL DEFAULT ''")
 
     cursor.execute("PRAGMA table_info(bed_bookings)")
     cols = {row[1] for row in cursor.fetchall()}
@@ -67,6 +83,14 @@ def ensure_guest_schema(cursor) -> None:
             """
             ALTER TABLE bed_bookings ADD COLUMN guest_id INTEGER REFERENCES guests(id)
             """
+        )
+    if "booking_kind" not in cols:
+        cursor.execute(
+            "ALTER TABLE bed_bookings ADD COLUMN booking_kind TEXT NOT NULL DEFAULT 'check_in'"
+        )
+    if "expected_arrival" not in cols:
+        cursor.execute(
+            "ALTER TABLE bed_bookings ADD COLUMN expected_arrival TEXT NOT NULL DEFAULT ''"
         )
 
 
@@ -116,6 +140,45 @@ def upsert_guest(
         [identity_key, phone_norm[:32], passport_norm[:64], nm or "Mehmon"],
     )
     return int(cursor.lastrowid)
+
+
+def upsert_guest_document_fields(cursor, guest_id: int, doc: dict[str, str]) -> None:
+    """OCR/AI dan kelgan hujjat maydonlarini guests jadvaliga yozadi."""
+    full_name = str(doc.get("doc_full_name") or "")[:200]
+    birth_date = str(doc.get("doc_birth_date") or "")[:10]
+    expiry_date = str(doc.get("doc_expiry_date") or "")[:10]
+    citizenship = str(doc.get("doc_citizenship") or "")[:64]
+    doc_number = str(doc.get("doc_number") or "")[:64]
+    doc_type = str(doc.get("doc_type") or "")[:40]
+    cursor.execute(
+        """
+        UPDATE guests
+        SET doc_full_name = CASE WHEN %s <> '' THEN %s ELSE doc_full_name END,
+            doc_birth_date = CASE WHEN %s <> '' THEN %s ELSE doc_birth_date END,
+            doc_expiry_date = CASE WHEN %s <> '' THEN %s ELSE doc_expiry_date END,
+            doc_citizenship = CASE WHEN %s <> '' THEN %s ELSE doc_citizenship END,
+            doc_number = CASE WHEN %s <> '' THEN %s ELSE doc_number END,
+            doc_type = CASE WHEN %s <> '' THEN %s ELSE doc_type END,
+            doc_extracted_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        [
+            full_name,
+            full_name,
+            birth_date,
+            birth_date,
+            expiry_date,
+            expiry_date,
+            citizenship,
+            citizenship,
+            doc_number,
+            doc_number,
+            doc_type,
+            doc_type,
+            int(guest_id),
+        ],
+    )
 
 
 def identity_hostel_active_stay_overlap(
@@ -168,6 +231,61 @@ def identity_hostel_active_stay_overlap(
             ],
         )
         return c.fetchone() is not None
+
+
+def identity_hostel_active_stay_overlap_detail(
+    hostel_name: str,
+    identity_key: str,
+    check_in: str,
+    nights: int,
+    exclude_booking_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Kesishuv bo‘lsa, boshqa aktiv yozuvning xona nomi, kodi va karavot raqami."""
+    legacy_value: str | None = None
+    if identity_key.startswith("phone:"):
+        legacy_value = identity_key[6:]
+    elif identity_key.startswith("doc:"):
+        legacy_value = identity_key[4:]
+    elif identity_key.startswith("passport:"):
+        legacy_value = identity_key[9:]
+    with connection.cursor() as c:
+        c.execute(
+            """
+            SELECT r.name, r.code, b.bed_index
+            FROM bed_bookings b
+            JOIN rooms r ON r.id = b.room_id
+            JOIN hostels h ON h.id = r.hostel_id
+            LEFT JOIN guests g ON g.id = b.guest_id
+            WHERE h.name = %s AND b.status = 'active'
+              AND (%s IS NULL OR CAST(b.id AS TEXT) <> %s)
+              AND (
+                (b.guest_id IS NOT NULL AND g.identity_key = %s)
+                OR (b.guest_id IS NULL AND %s IS NOT NULL AND b.guest_phone = %s)
+              )
+              AND julianday(b.check_in_date) <= julianday(%s, '+' || (%s - 1) || ' days')
+              AND julianday(%s) <= julianday(b.check_in_date, '+' || (b.nights - 1) || ' days')
+            LIMIT 1
+            """,
+            [
+                hostel_name,
+                exclude_booking_id,
+                exclude_booking_id,
+                identity_key,
+                legacy_value,
+                legacy_value,
+                check_in,
+                nights,
+                check_in,
+            ],
+        )
+        row = c.fetchone()
+        if not row:
+            return None
+        return {
+            "roomName": str(row[0] or ""),
+            "roomCode": str(row[1] or ""),
+            "bedIndex": int(row[2]),
+        }
 
 
 def guest_latest_name_by_identity(identity_key: str) -> str:
