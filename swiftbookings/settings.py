@@ -9,9 +9,12 @@ load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-change-in-production")
 
-DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
 
-ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
+ALLOWED_HOSTS = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if h.strip()]
+_railway_public = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+if _railway_public and _railway_public not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_railway_public)
 
 # SQLite fayli Django loyiha ichida. BASE_DIR = django_backend/
 _DEFAULT_SQLITE = BASE_DIR / "data" / "swift_bookings.sqlite"
@@ -72,7 +75,7 @@ ROOT_URLCONF = "swiftbookings.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "templates", BASE_DIR.parent / "dist"],
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -94,12 +97,9 @@ TIME_ZONE = "Asia/Tashkent"
 USE_I18N = True
 USE_TZ = True
 
-FRONTEND_DIST_DIR = BASE_DIR.parent / "dist"
-STATIC_URL = "/assets/"
+STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_DIRS = [p for p in [FRONTEND_DIST_DIR / "assets"] if p.exists()]
-WHITENOISE_ROOT = FRONTEND_DIST_DIR
-WHITENOISE_AUTOREFRESH = DEBUG
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOWED_ORIGINS = [
@@ -134,3 +134,9 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 15 * 1024 * 1024
 
 # REST yo'llar: /api/board, /api/users/1, ...
 APPEND_SLASH = False
+
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = os.environ.get("DJANGO_SECURE_SSL_REDIRECT", "1") == "1"
