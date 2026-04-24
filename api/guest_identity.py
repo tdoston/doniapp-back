@@ -91,6 +91,16 @@ def ensure_guest_schema(cursor) -> None:
         if "doc_extracted_at" not in gcols:
             cursor.execute("ALTER TABLE guests ADD COLUMN doc_extracted_at TEXT NOT NULL DEFAULT ''")
 
+    # Check if bed_bookings table exists before trying to alter it.
+    # On a fresh database the table won't exist yet (managed=False), so we
+    # skip adding columns here — they will be added once the table is created.
+    cursor.execute("""
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'bed_bookings'
+    """)
+    if not cursor.fetchone():
+        return  # Table doesn't exist yet, skip adding columns
+
     cols = _table_columns(cursor, "bed_bookings")
     if "guest_id" not in cols:
         cursor.execute(
