@@ -58,6 +58,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -71,7 +72,7 @@ ROOT_URLCONF = "swiftbookings.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "templates"],
+        "DIRS": [BASE_DIR / "templates", BASE_DIR.parent / "dist"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -93,7 +94,12 @@ TIME_ZONE = "Asia/Tashkent"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "static/"
+FRONTEND_DIST_DIR = BASE_DIR.parent / "dist"
+STATIC_URL = "/assets/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_DIRS = [p for p in [FRONTEND_DIST_DIR / "assets"] if p.exists()]
+WHITENOISE_ROOT = FRONTEND_DIST_DIR
+WHITENOISE_AUTOREFRESH = DEBUG
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOWED_ORIGINS = [
