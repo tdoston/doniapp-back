@@ -23,6 +23,12 @@ def _database_from_url(url: str) -> dict:
         q = parse_qs(p.query or "")
         ssl_vals = q.get("sslmode") or []
         sslmode = str(ssl_vals[0]).strip() if ssl_vals else ""
+        if not sslmode:
+            sslmode = os.environ.get("POSTGRES_SSLMODE", "").strip()
+        host_l = (p.hostname or "").lower()
+        # Railway TCP proxy — URL da sslmode bo‘lmasa, odatda SSL talab qilinadi
+        if not sslmode and "proxy.rlwy.net" in host_l:
+            sslmode = "require"
         options: dict[str, str] = {}
         if sslmode:
             options["sslmode"] = sslmode
@@ -94,6 +100,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "api.middleware.DatabaseUnavailableMiddleware",
 ]
 
 ROOT_URLCONF = "swiftbookings.urls"
