@@ -16,7 +16,7 @@ _railway_public = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
 if _railway_public and _railway_public not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_railway_public)
 
-# SQLite fayli Django loyiha ichida. BASE_DIR = django_backend/
+# SQLite fallback (faqat ixtiyoriy/local)
 _DEFAULT_SQLITE = BASE_DIR / "data" / "swift_bookings.sqlite"
 
 
@@ -37,14 +37,30 @@ def _database_from_url(url: str) -> dict:
 
 
 _db_url = os.environ.get("DATABASE_URL", "").strip()
-if _db_url.startswith("postgresql://") or _db_url.startswith("postgres://"):
-    DATABASES = {"default": _database_from_url(_db_url)}
-else:
+_db_mode = os.environ.get("DJANGO_DB_MODE", "postgres").strip().lower()
+if _db_mode == "sqlite":
     sqlite_path = os.environ.get("SQLITE_PATH", str(_DEFAULT_SQLITE))
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": sqlite_path,
+        }
+    }
+elif _db_url.startswith("postgresql://") or _db_url.startswith("postgres://"):
+    DATABASES = {"default": _database_from_url(_db_url)}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("POSTGRES_DB", "swift_bookings"),
+            "USER": os.environ.get("POSTGRES_USER", "postgres"),
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "postgres"),
+            "HOST": os.environ.get("POSTGRES_HOST", "127.0.0.1"),
+            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+            "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
+            "OPTIONS": {
+                "sslmode": os.environ.get("POSTGRES_SSLMODE", "prefer"),
+            },
         }
     }
 
