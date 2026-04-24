@@ -15,6 +15,9 @@ ALLOWED_HOSTS = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "127.
 _railway_public = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
 if _railway_public and _railway_public not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_railway_public)
+# Railway default URL: *.up.railway.app (Django — boshidagi nuqta bilan barcha subdomain)
+if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() and ".up.railway.app" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(".up.railway.app")
 
 def _database_from_url(url: str) -> dict:
     if url.startswith("postgresql://") or url.startswith("postgres://"):
