@@ -1,0 +1,7 @@
+Django>=4.2,<5
+psycopg[binary]>=3.1
+django-cors-headers>=4.3
+bcrypt>=4.1
+python-dotenv>=1.0
+openai>=1.52
+gunicorn>=22.0
