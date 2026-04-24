@@ -222,7 +222,7 @@ def board(request):
         ensure_guest_schema(c)
         c.execute(
             """
-            SELECT r.code, rc.status, COALESCE(rc.full_taken, 0), COALESCE(rc.full_taken_mode, '')
+            SELECT r.code, rc.status, COALESCE(CAST(rc.full_taken AS integer), 0), COALESCE(rc.full_taken_mode, '')
             FROM rooms r
             JOIN hostels h ON h.id = r.hostel_id
             LEFT JOIN room_cleaning rc ON rc.room_id = r.id
@@ -1067,7 +1067,7 @@ def cleaning_list(request):
               r.bed_count,
               r.room_kind,
               rc.status,
-              COALESCE(rc.full_taken, 0),
+              COALESCE(CAST(rc.full_taken AS integer), 0),
               COALESCE(rc.full_taken_mode, ''),
               rc.photos_before,
               rc.photos_after,
