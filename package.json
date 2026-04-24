@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py runserver 0.0.0.0:3001'",
-    "db:reset": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py seed_demo_sqlite'",
+    "db:reset": "bash -c 'echo \"PostgreSQL ishlatiladi: reset uchun DB'ni qayta yarating va migrate ishlating\"'",
     "migrate": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py migrate --noinput'",
     "check": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py check'",
     "admin:ensure": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py ensure_admin'",

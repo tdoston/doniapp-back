@@ -16,10 +16,6 @@ _railway_public = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
 if _railway_public and _railway_public not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_railway_public)
 
-# SQLite fallback (faqat ixtiyoriy/local)
-_DEFAULT_SQLITE = BASE_DIR / "data" / "swift_bookings.sqlite"
-
-
 def _database_from_url(url: str) -> dict:
     if url.startswith("postgresql://") or url.startswith("postgres://"):
         p = urlparse(url)
@@ -37,16 +33,7 @@ def _database_from_url(url: str) -> dict:
 
 
 _db_url = os.environ.get("DATABASE_URL", "").strip()
-_db_mode = os.environ.get("DJANGO_DB_MODE", "postgres").strip().lower()
-if _db_mode == "sqlite":
-    sqlite_path = os.environ.get("SQLITE_PATH", str(_DEFAULT_SQLITE))
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": sqlite_path,
-        }
-    }
-elif _db_url.startswith("postgresql://") or _db_url.startswith("postgres://"):
+if _db_url.startswith("postgresql://") or _db_url.startswith("postgres://"):
     DATABASES = {"default": _database_from_url(_db_url)}
 else:
     DATABASES = {

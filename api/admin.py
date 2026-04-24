@@ -1,4 +1,4 @@
-"""Biznes SQLite jadvallari admin panelda."""
+"""Biznes jadvallari admin panelda (PostgreSQL)."""
 
 from __future__ import annotations
 
@@ -68,7 +68,8 @@ class BookingWhenFilter(admin.SimpleListFilter):
                 .annotate(
                     _on_prop=RawSQL(
                         "(CASE WHEN bed_bookings.check_in_date <= %s AND %s < "
-                        "date(bed_bookings.check_in_date, '+' || CAST(bed_bookings.nights AS TEXT) || ' days') "
+                        "(CAST(NULLIF(bed_bookings.check_in_date, '') AS date) + "
+                        "(COALESCE(bed_bookings.nights, 1) * INTERVAL '1 day')) "
                         "THEN 1 ELSE 0 END)",
                         [today, today],
                         output_field=IntegerField(),
@@ -263,7 +264,7 @@ class BedBookingAdmin(admin.ModelAdmin):
 
     @admin.display(description="Chiqish")
     def stay_until_display(self, obj):
-        """Oxirgi tun kuni (SQLite date() bilan bir xil mantiq)."""
+        """Oxirgi tun kuni."""
         try:
             cin = obj.check_in_date
             if not cin or len(str(cin)) < 10:

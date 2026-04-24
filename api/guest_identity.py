@@ -1,4 +1,4 @@
-"""Mehmon identifikatori: telefon yoki pasport seriyasi; SQLite `guests` sxemasi."""
+"""Mehmon identifikatori: telefon yoki pasport seriyasi; PostgreSQL `guests` sxemasi."""
 
 from __future__ import annotations
 
@@ -6,6 +6,23 @@ import re
 from typing import Any
 
 from django.db import connection
+
+
+def _table_exists(cursor, table_name: str) -> bool:
+    cursor.execute("SELECT to_regclass(%s)", [f"public.{table_name}"])
+    return bool(cursor.fetchone()[0])
+
+
+def _table_columns(cursor, table_name: str) -> set[str]:
+    cursor.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        [table_name],
+    )
+    return {str(row[0]) for row in cursor.fetchall()}
 
 
 def normalize_passport_series(raw: str) -> str:
@@ -41,26 +58,24 @@ def guest_phone_column_value(identity_key: str, phone_norm: str, passport_norm: 
 
 def ensure_guest_schema(cursor) -> None:
     """Idempotent: `guests` jadvali va `bed_bookings.guest_id`."""
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='guests'")
-    if not cursor.fetchone():
+    if not _table_exists(cursor, "guests"):
         cursor.execute(
             """
             CREATE TABLE guests (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              identity_key TEXT NOT NULL UNIQUE,
-              phone_normalized TEXT NOT NULL DEFAULT '',
-              passport_series TEXT NOT NULL DEFAULT '',
-              guest_name TEXT NOT NULL DEFAULT '',
-              created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-              updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+              id BIGSERIAL PRIMARY KEY,
+              identity_key VARCHAR(128) NOT NULL UNIQUE,
+              phone_normalized VARCHAR(32) NOT NULL DEFAULT '',
+              passport_series VARCHAR(64) NOT NULL DEFAULT '',
+              guest_name VARCHAR(200) NOT NULL DEFAULT '',
+              created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
         cursor.execute("CREATE INDEX IF NOT EXISTS guests_identity_idx ON guests(identity_key)")
     else:
         cursor.execute("CREATE INDEX IF NOT EXISTS guests_identity_idx ON guests(identity_key)")
-        cursor.execute("PRAGMA table_info(guests)")
-        gcols = {row[1] for row in cursor.fetchall()}
+        gcols = _table_columns(cursor, "guests")
         if "doc_full_name" not in gcols:
             cursor.execute("ALTER TABLE guests ADD COLUMN doc_full_name TEXT NOT NULL DEFAULT ''")
         if "doc_birth_date" not in gcols:
@@ -76,12 +91,11 @@ def ensure_guest_schema(cursor) -> None:
         if "doc_extracted_at" not in gcols:
             cursor.execute("ALTER TABLE guests ADD COLUMN doc_extracted_at TEXT NOT NULL DEFAULT ''")
 
-    cursor.execute("PRAGMA table_info(bed_bookings)")
-    cols = {row[1] for row in cursor.fetchall()}
+    cols = _table_columns(cursor, "bed_bookings")
     if "guest_id" not in cols:
         cursor.execute(
             """
-            ALTER TABLE bed_bookings ADD COLUMN guest_id INTEGER REFERENCES guests(id)
+            ALTER TABLE bed_bookings ADD COLUMN guest_id BIGINT REFERENCES guests(id)
             """
         )
     if "booking_kind" not in cols:
@@ -136,10 +150,11 @@ def upsert_guest(
         """
         INSERT INTO guests (identity_key, phone_normalized, passport_series, guest_name)
         VALUES (%s, %s, %s, %s)
+        RETURNING id
         """,
         [identity_key, phone_norm[:32], passport_norm[:64], nm or "Mehmon"],
     )
-    return int(cursor.lastrowid)
+    return int(cursor.fetchone()[0])
 
 
 def upsert_guest_document_fields(cursor, guest_id: int, doc: dict[str, str]) -> None:
@@ -214,8 +229,8 @@ def identity_hostel_active_stay_overlap(
                 (b.guest_id IS NOT NULL AND g.identity_key = %s)
                 OR (b.guest_id IS NULL AND %s IS NOT NULL AND b.guest_phone = %s)
               )
-              AND julianday(b.check_in_date) <= julianday(%s, '+' || (%s - 1) || ' days')
-              AND julianday(%s) <= julianday(b.check_in_date, '+' || (b.nights - 1) || ' days')
+              AND CAST(NULLIF(b.check_in_date, '') AS date) <= (CAST(%s AS date) + ((%s - 1) * INTERVAL '1 day'))
+              AND CAST(%s AS date) <= (CAST(NULLIF(b.check_in_date, '') AS date) + ((COALESCE(b.nights, 1) - 1) * INTERVAL '1 day'))
             LIMIT 1
             """,
             [
@@ -262,8 +277,8 @@ def identity_hostel_active_stay_overlap_detail(
                 (b.guest_id IS NOT NULL AND g.identity_key = %s)
                 OR (b.guest_id IS NULL AND %s IS NOT NULL AND b.guest_phone = %s)
               )
-              AND julianday(b.check_in_date) <= julianday(%s, '+' || (%s - 1) || ' days')
-              AND julianday(%s) <= julianday(b.check_in_date, '+' || (b.nights - 1) || ' days')
+              AND CAST(NULLIF(b.check_in_date, '') AS date) <= (CAST(%s AS date) + ((%s - 1) * INTERVAL '1 day'))
+              AND CAST(%s AS date) <= (CAST(NULLIF(b.check_in_date, '') AS date) + ((COALESCE(b.nights, 1) - 1) * INTERVAL '1 day'))
             LIMIT 1
             """,
             [

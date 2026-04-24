@@ -87,13 +87,13 @@ def _prune_old_cleaning_photos(cursor: Any) -> None:
         UPDATE room_cleaning
         SET photos_before = '[]',
             photos_after = '[]'
-        WHERE datetime(updated_at) <= datetime('now', ?)
+        WHERE updated_at <= (CURRENT_TIMESTAMP - (%s * INTERVAL '1 day'))
           AND (
             COALESCE(photos_before, '[]') <> '[]'
             OR COALESCE(photos_after, '[]') <> '[]'
           )
         """,
-        [f"-{CLEANING_PHOTO_RETENTION_DAYS} days"],
+        [CLEANING_PHOTO_RETENTION_DAYS],
     )
 
 
@@ -142,8 +142,8 @@ def _has_overlap(
             FROM bed_bookings b
             WHERE b.room_id = %s AND b.bed_index = %s AND b.status = 'active'
               AND (%s IS NULL OR b.id <> %s)
-              AND julianday(b.check_in_date) <= julianday(%s, '+' || (%s - 1) || ' days')
-              AND julianday(%s) <= julianday(b.check_in_date, '+' || (b.nights - 1) || ' days')
+              AND CAST(NULLIF(b.check_in_date, '') AS date) <= (CAST(%s AS date) + ((%s - 1) * INTERVAL '1 day'))
+              AND CAST(%s AS date) <= (CAST(NULLIF(b.check_in_date, '') AS date) + ((COALESCE(b.nights, 1) - 1) * INTERVAL '1 day'))
             LIMIT 1
             """,
             [room_id, bed_index, exclude_booking_id, exclude_booking_id, check_in, nights, check_in],
@@ -165,8 +165,8 @@ def _find_active_overlap_booking(
             FROM bed_bookings b
             WHERE b.room_id = %s AND b.bed_index = %s AND b.status = 'active'
               AND (%s IS NULL OR b.id <> %s)
-              AND julianday(b.check_in_date) <= julianday(%s, '+' || (%s - 1) || ' days')
-              AND julianday(%s) <= julianday(b.check_in_date, '+' || (b.nights - 1) || ' days')
+              AND CAST(NULLIF(b.check_in_date, '') AS date) <= (CAST(%s AS date) + ((%s - 1) * INTERVAL '1 day'))
+              AND CAST(%s AS date) <= (CAST(NULLIF(b.check_in_date, '') AS date) + ((COALESCE(b.nights, 1) - 1) * INTERVAL '1 day'))
             ORDER BY b.updated_at DESC
             LIMIT 1
             """,
@@ -260,7 +260,8 @@ def board(request):
             JOIN rooms r ON r.id = b.room_id
             JOIN hostels h ON h.id = r.hostel_id
             WHERE h.name = %s AND r.room_kind = 'dorm' AND b.status = 'active'
-              AND b.check_in_date <= %s AND %s < date(b.check_in_date, '+' || b.nights || ' days')
+              AND CAST(NULLIF(b.check_in_date, '') AS date) <= CAST(%s AS date)
+              AND CAST(%s AS date) < (CAST(NULLIF(b.check_in_date, '') AS date) + (COALESCE(b.nights, 1) * INTERVAL '1 day'))
             """,
             [hostel, date_iso, date_iso],
         )
@@ -293,7 +294,8 @@ def board(request):
             JOIN rooms r ON r.id = b.room_id
             JOIN hostels h ON h.id = r.hostel_id
             WHERE h.name = %s AND r.room_kind = 'dorm' AND b.status = 'active'
-              AND b.check_in_date <= %s AND %s < date(b.check_in_date, '+' || b.nights || ' days')
+              AND CAST(NULLIF(b.check_in_date, '') AS date) <= CAST(%s AS date)
+              AND CAST(%s AS date) < (CAST(NULLIF(b.check_in_date, '') AS date) + (COALESCE(b.nights, 1) * INTERVAL '1 day'))
             """,
             [hostel, date_iso, date_iso],
         )
@@ -893,11 +895,9 @@ def guests_recent(request):
                 COALESCE(
                   g.identity_key,
                   CASE
-                    WHEN typeof(b.guest_phone) IN ('text','blob')
-                         AND length(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '')) >= 9
-                         AND replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '') GLOB '[0-9]*'
-                    THEN 'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
-                    ELSE 'doc:' || upper(trim(ifnull(b.guest_phone, '')))
+                    WHEN length(regexp_replace(COALESCE(b.guest_phone, ''), '[^0-9]', '', 'g')) >= 9
+                    THEN 'phone:' || trim(regexp_replace(COALESCE(b.guest_phone, ''), '[^0-9]', '', 'g'))
+                    ELSE 'doc:' || upper(trim(COALESCE(b.guest_phone, '')))
                   END
                 ) AS lk,
                 b.guest_name,
@@ -908,17 +908,16 @@ def guests_recent(request):
                 b.notes,
                 h.name AS hostel,
                 r.name AS room_name,
-                ifnull(g.phone_normalized, '') AS g_phone,
-                ifnull(g.passport_series, '') AS g_pass,
-                ifnull(b.photos, '[]') AS booking_photos,
+                COALESCE(g.phone_normalized, '') AS g_phone,
+                COALESCE(g.passport_series, '') AS g_pass,
+                COALESCE(b.photos, '[]') AS booking_photos,
                 ROW_NUMBER() OVER (
                   PARTITION BY COALESCE(
                     g.identity_key,
                     CASE
-                      WHEN length(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '')) >= 9
-                           AND replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '') GLOB '[0-9]*'
-                      THEN 'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
-                      ELSE 'doc:' || upper(trim(ifnull(b.guest_phone, '')))
+                      WHEN length(regexp_replace(COALESCE(b.guest_phone, ''), '[^0-9]', '', 'g')) >= 9
+                      THEN 'phone:' || trim(regexp_replace(COALESCE(b.guest_phone, ''), '[^0-9]', '', 'g'))
+                      ELSE 'doc:' || upper(trim(COALESCE(b.guest_phone, '')))
                     END
                   )
                   ORDER BY b.check_in_date DESC, b.created_at DESC
@@ -999,11 +998,9 @@ def guests_history(request):
                 COALESCE(b.updated_at, '') AS updated_at,
                 (
                   CASE
-                    WHEN typeof(b.guest_phone) IN ('text','blob')
-                         AND length(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '')) >= 9
-                         AND replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', '') GLOB '[0-9]*'
-                    THEN 'phone:' || trim(replace(replace(replace(ifnull(b.guest_phone, ''), '+', ''), '-', ''), ' ', ''))
-                    ELSE 'doc:' || upper(trim(ifnull(b.guest_phone, '')))
+                    WHEN length(regexp_replace(COALESCE(b.guest_phone, ''), '[^0-9]', '', 'g')) >= 9
+                    THEN 'phone:' || trim(regexp_replace(COALESCE(b.guest_phone, ''), '[^0-9]', '', 'g'))
+                    ELSE 'doc:' || upper(trim(COALESCE(b.guest_phone, '')))
                   END
                 ) AS lookup_key
               FROM bed_bookings b
@@ -1077,12 +1074,14 @@ def cleaning_list(request):
               (
                 SELECT CAST(COUNT(*) AS TEXT) FROM bed_bookings b
                 WHERE b.room_id = r.id AND b.status = 'active'
-                  AND b.check_in_date <= %s AND %s < date(b.check_in_date, '+' || b.nights || ' days')
+                  AND CAST(NULLIF(b.check_in_date, '') AS date) <= CAST(%s AS date)
+                  AND CAST(%s AS date) < (CAST(NULLIF(b.check_in_date, '') AS date) + (COALESCE(b.nights, 1) * INTERVAL '1 day'))
               ) AS occupied,
               (
                 SELECT b.guest_name FROM bed_bookings b
                 WHERE b.room_id = r.id AND b.status = 'active'
-                  AND b.check_in_date <= %s AND %s < date(b.check_in_date, '+' || b.nights || ' days')
+                  AND CAST(NULLIF(b.check_in_date, '') AS date) <= CAST(%s AS date)
+                  AND CAST(%s AS date) < (CAST(NULLIF(b.check_in_date, '') AS date) + (COALESCE(b.nights, 1) * INTERVAL '1 day'))
                 ORDER BY b.bed_index ASC
                 LIMIT 1
               ) AS guest_name

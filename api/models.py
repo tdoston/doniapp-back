@@ -1,5 +1,5 @@
 """
-SQLite biznes jadvallari (sql/schema.sql). ORM faqat admin / ko'rish uchun — `managed = False`.
+PostgreSQL biznes jadvallari. ORM faqat admin / ko'rish uchun — `managed = False`.
 """
 
 from __future__ import annotations
