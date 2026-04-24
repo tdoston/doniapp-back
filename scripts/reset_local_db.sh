@@ -13,4 +13,5 @@ createdb -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" "$DB"
 export PGDATABASE="$DB"
 psql -v ON_ERROR_STOP=1 -f "$ROOT/sql/postgres_bootstrap.sql"
 cd "$ROOT"
-exec "${PYTHON:-./.venv/bin/python}" manage.py migrate --noinput
+"${PYTHON:-./.venv/bin/python}" manage.py migrate --noinput
+"${PYTHON:-./.venv/bin/python}" manage.py seed_initial_db

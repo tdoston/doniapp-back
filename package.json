@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py runserver 0.0.0.0:3001'",
     "db:bootstrap": "bash scripts/bootstrap_local_postgres.sh",
+    "db:seed": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py seed_initial_db'",
     "db:local:reset": "bash scripts/reset_local_db.sh",
     "migrate": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py migrate --noinput'",
     "check": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py check'",
