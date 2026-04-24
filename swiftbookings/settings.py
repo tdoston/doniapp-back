@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 from dotenv import load_dotenv
 
@@ -20,6 +20,12 @@ def _database_from_url(url: str) -> dict:
     if url.startswith("postgresql://") or url.startswith("postgres://"):
         p = urlparse(url)
         path = (p.path or "").lstrip("/")
+        q = parse_qs(p.query or "")
+        ssl_vals = q.get("sslmode") or []
+        sslmode = str(ssl_vals[0]).strip() if ssl_vals else ""
+        options: dict[str, str] = {}
+        if sslmode:
+            options["sslmode"] = sslmode
         return {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": path or "swift_bookings",
@@ -28,11 +34,28 @@ def _database_from_url(url: str) -> dict:
             "HOST": p.hostname or "127.0.0.1",
             "PORT": str(p.port or 5432),
             "CONN_MAX_AGE": 60,
+            **({"OPTIONS": options} if options else {}),
         }
     return {}
 
 
-_db_url = os.environ.get("DATABASE_URL", "").strip()
+# Railway: ichki tarmoqda `DATABASE_URL` (private). Lokal/tashqi: `DATABASE_PUBLIC_URL` yoki
+# `RAILWAY_TCP_PROXY_DOMAIN` + `RAILWAY_TCP_PROXY_PORT` + `POSTGRES_*`.
+_db_url = (
+    os.environ.get("DATABASE_URL", "").strip()
+    or os.environ.get("DATABASE_PUBLIC_URL", "").strip()
+)
+_tcp_host = os.environ.get("RAILWAY_TCP_PROXY_DOMAIN", "").strip()
+_tcp_port = os.environ.get("RAILWAY_TCP_PROXY_PORT", "").strip()
+_pg_user = os.environ.get("POSTGRES_USER", "postgres").strip()
+_pg_pass = os.environ.get("POSTGRES_PASSWORD", "").strip()
+_pg_db = os.environ.get("POSTGRES_DB", "railway").strip()
+if not _db_url and _tcp_host and _pg_pass:
+    port = _tcp_port or "5432"
+    _db_url = (
+        f"postgresql://{quote_plus(_pg_user)}:{quote_plus(_pg_pass)}"
+        f"@{_tcp_host}:{port}/{_pg_db}?sslmode=require"
+    )
 if _db_url.startswith("postgresql://") or _db_url.startswith("postgres://"):
     DATABASES = {"default": _database_from_url(_db_url)}
 else:
