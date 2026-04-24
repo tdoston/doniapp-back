@@ -1,12 +1,15 @@
-"""SQLite: `guests` jadvali va `bed_bookings.guest_id` (idempotent)."""
+"""PostgreSQL: avvalo biznes DDL; keyin `guests` va `bed_bookings.guest_id` (idempotent)."""
 
-from django.db import connection, migrations
+from django.db import migrations
 
 
 def forwards(apps, schema_editor):
     from api.guest_identity import ensure_guest_schema
+    from api.pg_bootstrap import apply_postgres_bootstrap_sql
 
-    with connection.cursor() as c:
+    conn = schema_editor.connection
+    apply_postgres_bootstrap_sql(conn)
+    with conn.cursor() as c:
         ensure_guest_schema(c)
 
 

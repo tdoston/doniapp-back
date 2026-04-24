@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
+
+from api.pg_bootstrap import apply_postgres_bootstrap_sql
 
 
 class Command(BaseCommand):
@@ -17,25 +17,7 @@ class Command(BaseCommand):
             self.stdout.write("bootstrap_postgres_schema: not PostgreSQL, skip.")
             return
 
-        path = Path(settings.BASE_DIR) / "sql" / "postgres_bootstrap.sql"
-        raw = path.read_text(encoding="utf-8")
-        # BEGIN/COMMIT o'rniga bitta atomic blok
-        body = raw.replace("BEGIN;", "").replace("COMMIT;", "")
-        statements: list[str] = []
-        for chunk in body.split(";"):
-            stmt = chunk.strip()
-            if not stmt:
-                continue
-            if not any(
-                line.strip() and not line.strip().startswith("--")
-                for line in stmt.splitlines()
-            ):
-                continue
-            statements.append(stmt)
-
         with transaction.atomic():
-            with connection.cursor() as cursor:
-                for stmt in statements:
-                    cursor.execute(stmt)
+            apply_postgres_bootstrap_sql(connection)
 
         self.stdout.write(self.style.SUCCESS("bootstrap_postgres_schema: OK"))
