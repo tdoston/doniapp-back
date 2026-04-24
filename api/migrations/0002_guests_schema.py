@@ -1,4 +1,4 @@
-"""SQLite: `guests` jadvali va `bed_bookings.guest_id` (idempotent)."""
+"""Idempotent: `guests` table and `bed_bookings.guest_id` column (SQLite + PostgreSQL)."""
 
 from django.db import connection, migrations
 

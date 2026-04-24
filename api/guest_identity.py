@@ -1,4 +1,4 @@
-"""Mehmon identifikatori: telefon yoki pasport seriyasi; SQLite `guests` sxemasi."""
+"""Mehmon identifikatori: telefon yoki pasport seriyasi; `guests` sxemasi."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ def normalize_phone_digits(raw: str) -> str:
 def compute_identity_key(phone: str, passport_series: str) -> tuple[str | None, str | None]:
     """
     Birlamchi identifikator: HUJJAT seriyasi (pasport yoki haydovchilik guvohnomasi, >=4 belgi).
-    Telefon — ixtiyoriy qo‘shimcha, unique uchun ishlatilmaydi.
-    Eski yozuvlar uchun: agar seriya bo‘lmasa va telefon (>=9 raqam) bo‘lsa — `phone:` kalitiga tushadi.
+    Telefon — ixtiyoriy qo'shimcha, unique uchun ishlatilmaydi.
+    Eski yozuvlar uchun: agar seriya bo'lmasa va telefon (>=9 raqam) bo'lsa — `phone:` kalitiga tushadi.
     Qaytaradi: (identity_key, xato_xabari).
     """
     ps = normalize_passport_series(passport_series)
@@ -33,34 +33,77 @@ def compute_identity_key(phone: str, passport_series: str) -> tuple[str | None, 
 
 
 def guest_phone_column_value(identity_key: str, phone_norm: str, passport_norm: str) -> str:
-    """`bed_bookings.guest_phone` — taxtada ko‘rinadi (hujjat seriyasi yoki telefon)."""
+    """`bed_bookings.guest_phone` — taxtada ko'rinadi (hujjat seriyasi yoki telefon)."""
     if identity_key.startswith("doc:") or identity_key.startswith("passport:"):
         return (passport_norm or phone_norm)[:32]
     return (phone_norm or passport_norm)[:32]
 
 
+def _table_exists(cursor, table_name: str) -> bool:
+    """Database-agnostic table existence check."""
+    if connection.vendor == "sqlite":
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=%s", [table_name]
+        )
+    else:
+        # PostgreSQL and other ANSI-SQL databases
+        cursor.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            [table_name],
+        )
+    return cursor.fetchone() is not None
+
+
+def _get_table_columns(cursor, table_name: str) -> set[str]:
+    """Database-agnostic column name retrieval."""
+    if connection.vendor == "sqlite":
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return {row[1] for row in cursor.fetchall()}
+    else:
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            [table_name],
+        )
+        return {row[0] for row in cursor.fetchall()}
+
+
 def ensure_guest_schema(cursor) -> None:
     """Idempotent: `guests` jadvali va `bed_bookings.guest_id`."""
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='guests'")
-    if not cursor.fetchone():
-        cursor.execute(
-            """
-            CREATE TABLE guests (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              identity_key TEXT NOT NULL UNIQUE,
-              phone_normalized TEXT NOT NULL DEFAULT '',
-              passport_series TEXT NOT NULL DEFAULT '',
-              guest_name TEXT NOT NULL DEFAULT '',
-              created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-              updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+    if not _table_exists(cursor, "guests"):
+        if connection.vendor == "sqlite":
+            cursor.execute(
+                """
+                CREATE TABLE guests (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  identity_key TEXT NOT NULL UNIQUE,
+                  phone_normalized TEXT NOT NULL DEFAULT '',
+                  passport_series TEXT NOT NULL DEFAULT '',
+                  guest_name TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                  updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+                )
+                """
             )
-            """
-        )
+        else:
+            cursor.execute(
+                """
+                CREATE TABLE guests (
+                  id BIGSERIAL PRIMARY KEY,
+                  identity_key VARCHAR(96) NOT NULL UNIQUE,
+                  phone_normalized VARCHAR(32) NOT NULL DEFAULT '',
+                  passport_series VARCHAR(64) NOT NULL DEFAULT '',
+                  guest_name VARCHAR(200) NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL DEFAULT '',
+                  updated_at TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
         cursor.execute("CREATE INDEX IF NOT EXISTS guests_identity_idx ON guests(identity_key)")
     else:
         cursor.execute("CREATE INDEX IF NOT EXISTS guests_identity_idx ON guests(identity_key)")
-        cursor.execute("PRAGMA table_info(guests)")
-        gcols = {row[1] for row in cursor.fetchall()}
+        gcols = _get_table_columns(cursor, "guests")
         if "doc_full_name" not in gcols:
             cursor.execute("ALTER TABLE guests ADD COLUMN doc_full_name TEXT NOT NULL DEFAULT ''")
         if "doc_birth_date" not in gcols:
@@ -76,8 +119,7 @@ def ensure_guest_schema(cursor) -> None:
         if "doc_extracted_at" not in gcols:
             cursor.execute("ALTER TABLE guests ADD COLUMN doc_extracted_at TEXT NOT NULL DEFAULT ''")
 
-    cursor.execute("PRAGMA table_info(bed_bookings)")
-    cols = {row[1] for row in cursor.fetchall()}
+    cols = _get_table_columns(cursor, "bed_bookings")
     if "guest_id" not in cols:
         cursor.execute(
             """
@@ -132,14 +174,25 @@ def upsert_guest(
             )
         return gid
 
-    cursor.execute(
-        """
-        INSERT INTO guests (identity_key, phone_normalized, passport_series, guest_name)
-        VALUES (%s, %s, %s, %s)
-        """,
-        [identity_key, phone_norm[:32], passport_norm[:64], nm or "Mehmon"],
-    )
-    return int(cursor.lastrowid)
+    if connection.vendor == "sqlite":
+        cursor.execute(
+            """
+            INSERT INTO guests (identity_key, phone_normalized, passport_series, guest_name)
+            VALUES (%s, %s, %s, %s)
+            """,
+            [identity_key, phone_norm[:32], passport_norm[:64], nm or "Mehmon"],
+        )
+        return int(cursor.lastrowid)
+    else:
+        cursor.execute(
+            """
+            INSERT INTO guests (identity_key, phone_normalized, passport_series, guest_name)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
+            [identity_key, phone_norm[:32], passport_norm[:64], nm or "Mehmon"],
+        )
+        return int(cursor.fetchone()[0])
 
 
 def upsert_guest_document_fields(cursor, guest_id: int, doc: dict[str, str]) -> None:
@@ -181,6 +234,31 @@ def upsert_guest_document_fields(cursor, guest_id: int, doc: dict[str, str]) -> 
     )
 
 
+def _date_overlap_sql() -> str:
+    """
+    Returns a SQL fragment for date-range overlap check, compatible with both
+    SQLite (julianday) and PostgreSQL (DATE arithmetic).
+
+    Placeholder order: check_in_date_col, new_check_in, new_nights,
+                       new_check_in, check_in_date_col, nights_col
+    The overlap condition is:
+        existing_start <= new_end  AND  new_start <= existing_end
+    where:
+        existing_end = check_in_date + (nights - 1) days
+        new_end      = new_check_in  + (new_nights - 1) days
+    """
+    if connection.vendor == "sqlite":
+        return (
+            "julianday({ci}) <= julianday(%s, '+' || (%s - 1) || ' days')"
+            " AND julianday(%s) <= julianday({ci}, '+' || ({n} - 1) || ' days')"
+        )
+    else:
+        return (
+            "{ci}::date <= %s::date + (%s - 1) * INTERVAL '1 day'"
+            " AND %s::date <= {ci}::date + ({n} - 1) * INTERVAL '1 day'"
+        )
+
+
 def identity_hostel_active_stay_overlap(
     hostel_name: str,
     identity_key: str,
@@ -190,7 +268,7 @@ def identity_hostel_active_stay_overlap(
 ) -> bool:
     """Shu identifikator bilan filialda aktiv bron sanalari kesishadimi.
 
-    Eski yozuvlar `guests` jadvalisiz bo‘lsa: `bed_bookings.guest_phone` ustuniga
+    Eski yozuvlar `guests` jadvalisiz bo'lsa: `bed_bookings.guest_phone` ustuniga
     qarab ham tekshiramiz (telefon raqami yoki hujjat seriyasi shu yerda saqlanadi).
     """
     legacy_value: str | None = None
@@ -200,24 +278,26 @@ def identity_hostel_active_stay_overlap(
         legacy_value = identity_key[4:]
     elif identity_key.startswith("passport:"):
         legacy_value = identity_key[9:]
+
+    overlap_fragment = _date_overlap_sql().format(ci="b.check_in_date", n="b.nights")
+    sql = f"""
+        SELECT 1
+        FROM bed_bookings b
+        JOIN rooms r ON r.id = b.room_id
+        JOIN hostels h ON h.id = r.hostel_id
+        LEFT JOIN guests g ON g.id = b.guest_id
+        WHERE h.name = %s AND b.status = 'active'
+          AND (%s IS NULL OR CAST(b.id AS TEXT) <> %s)
+          AND (
+            (b.guest_id IS NOT NULL AND g.identity_key = %s)
+            OR (b.guest_id IS NULL AND %s IS NOT NULL AND b.guest_phone = %s)
+          )
+          AND {overlap_fragment}
+        LIMIT 1
+    """
     with connection.cursor() as c:
         c.execute(
-            """
-            SELECT 1
-            FROM bed_bookings b
-            JOIN rooms r ON r.id = b.room_id
-            JOIN hostels h ON h.id = r.hostel_id
-            LEFT JOIN guests g ON g.id = b.guest_id
-            WHERE h.name = %s AND b.status = 'active'
-              AND (%s IS NULL OR CAST(b.id AS TEXT) <> %s)
-              AND (
-                (b.guest_id IS NOT NULL AND g.identity_key = %s)
-                OR (b.guest_id IS NULL AND %s IS NOT NULL AND b.guest_phone = %s)
-              )
-              AND julianday(b.check_in_date) <= julianday(%s, '+' || (%s - 1) || ' days')
-              AND julianday(%s) <= julianday(b.check_in_date, '+' || (b.nights - 1) || ' days')
-            LIMIT 1
-            """,
+            sql,
             [
                 hostel_name,
                 exclude_booking_id,
@@ -240,7 +320,7 @@ def identity_hostel_active_stay_overlap_detail(
     nights: int,
     exclude_booking_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Kesishuv bo‘lsa, boshqa aktiv yozuvning xona nomi, kodi va karavot raqami."""
+    """Kesishuv bo'lsa, boshqa aktiv yozuvning xona nomi, kodi va karavot raqami."""
     legacy_value: str | None = None
     if identity_key.startswith("phone:"):
         legacy_value = identity_key[6:]
@@ -248,24 +328,26 @@ def identity_hostel_active_stay_overlap_detail(
         legacy_value = identity_key[4:]
     elif identity_key.startswith("passport:"):
         legacy_value = identity_key[9:]
+
+    overlap_fragment = _date_overlap_sql().format(ci="b.check_in_date", n="b.nights")
+    sql = f"""
+        SELECT r.name, r.code, b.bed_index
+        FROM bed_bookings b
+        JOIN rooms r ON r.id = b.room_id
+        JOIN hostels h ON h.id = r.hostel_id
+        LEFT JOIN guests g ON g.id = b.guest_id
+        WHERE h.name = %s AND b.status = 'active'
+          AND (%s IS NULL OR CAST(b.id AS TEXT) <> %s)
+          AND (
+            (b.guest_id IS NOT NULL AND g.identity_key = %s)
+            OR (b.guest_id IS NULL AND %s IS NOT NULL AND b.guest_phone = %s)
+          )
+          AND {overlap_fragment}
+        LIMIT 1
+    """
     with connection.cursor() as c:
         c.execute(
-            """
-            SELECT r.name, r.code, b.bed_index
-            FROM bed_bookings b
-            JOIN rooms r ON r.id = b.room_id
-            JOIN hostels h ON h.id = r.hostel_id
-            LEFT JOIN guests g ON g.id = b.guest_id
-            WHERE h.name = %s AND b.status = 'active'
-              AND (%s IS NULL OR CAST(b.id AS TEXT) <> %s)
-              AND (
-                (b.guest_id IS NOT NULL AND g.identity_key = %s)
-                OR (b.guest_id IS NULL AND %s IS NOT NULL AND b.guest_phone = %s)
-              )
-              AND julianday(b.check_in_date) <= julianday(%s, '+' || (%s - 1) || ' days')
-              AND julianday(%s) <= julianday(b.check_in_date, '+' || (b.nights - 1) || ' days')
-            LIMIT 1
-            """,
+            sql,
             [
                 hostel_name,
                 exclude_booking_id,

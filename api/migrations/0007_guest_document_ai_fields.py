@@ -1,10 +1,11 @@
 from django.db import migrations
 
+from api.guest_identity import _get_table_columns
+
 
 def forwards(apps, schema_editor):
     with schema_editor.connection.cursor() as c:
-        c.execute("PRAGMA table_info(guests)")
-        cols = {row[1] for row in c.fetchall()}
+        cols = _get_table_columns(c, "guests")
         if "doc_full_name" not in cols:
             c.execute("ALTER TABLE guests ADD COLUMN doc_full_name TEXT NOT NULL DEFAULT ''")
         if "doc_birth_date" not in cols:

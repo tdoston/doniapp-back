@@ -1,10 +1,11 @@
 from django.db import migrations
 
+from api.guest_identity import _get_table_columns
+
 
 def forwards(apps, schema_editor):
     with schema_editor.connection.cursor() as c:
-        c.execute("PRAGMA table_info(bed_bookings)")
-        cols = {row[1] for row in c.fetchall()}
+        cols = _get_table_columns(c, "bed_bookings")
         if "cancel_reason_bron" not in cols:
             c.execute("ALTER TABLE bed_bookings ADD COLUMN cancel_reason_bron TEXT NOT NULL DEFAULT ''")
         if "cancel_reason_checkin" not in cols:
