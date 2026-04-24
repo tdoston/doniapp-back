@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   bed_count SMALLINT NOT NULL CHECK (bed_count >= 0 AND bed_count <= 32),
   room_kind VARCHAR(20) NOT NULL DEFAULT 'dorm' CHECK (room_kind IN ('dorm', 'bathroom')),
   photos TEXT NOT NULL DEFAULT '[]',
+  inactive BOOLEAN NOT NULL DEFAULT FALSE,
   UNIQUE (hostel_id, code)
 );
 CREATE INDEX IF NOT EXISTS rooms_hostel_idx ON rooms (hostel_id);

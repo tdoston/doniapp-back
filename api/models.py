@@ -57,6 +57,7 @@ class Room(models.Model):
     bed_count = models.PositiveSmallIntegerField()
     room_kind = models.CharField(max_length=20, default="dorm")
     photos = models.TextField(default="[]")
+    inactive = models.BooleanField(default=False)
 
     class Meta:
         managed = False
@@ -122,6 +123,34 @@ class RoomCleaning(models.Model):
         db_table = "room_cleaning"
         verbose_name = "Xona tozaligi"
         verbose_name_plural = "Xona tozaligi"
+
+
+class CancelReasonOption(models.Model):
+    """Bekor qilish sabablari (check-in / taxta bron) — frontend katalog API."""
+
+    SCOPE_BOOKING_CHECKIN = "booking_checkin"
+    SCOPE_BRON_BOARD = "bron_board"
+    SCOPE_CHOICES = [
+        (SCOPE_BOOKING_CHECKIN, "Check-in bekor"),
+        (SCOPE_BRON_BOARD, "Taxta bron bekor"),
+    ]
+
+    scope = models.CharField(max_length=32, choices=SCOPE_CHOICES, db_index=True)
+    code = models.CharField(max_length=64)
+    label = models.CharField(max_length=255)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "cancel_reason_options"
+        verbose_name = "Bekor sababi"
+        verbose_name_plural = "Bekor sabablari"
+        constraints = [
+            models.UniqueConstraint(fields=["scope", "code"], name="uniq_cancel_reason_scope_code"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.scope} · {self.code}"
 
 
 class StaffUser(models.Model):

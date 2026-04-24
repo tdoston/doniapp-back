@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 
-from .models import BedBooking, Guest, Hostel, Room, RoomCleaning, StaffUser
+from .models import BedBooking, CancelReasonOption, Guest, Hostel, Room, RoomCleaning, StaffUser
 
 _MAX_INLINE_SRC = 2_500_000  # data URL xavfsizlik / brauzer
 
@@ -442,6 +442,14 @@ class RoomCleaningAdmin(admin.ModelAdmin):
     @admin.display(description="Keyin rasmlar")
     def photos_gallery_after(self, obj):
         return self._mini_gallery("Keyin (posle)", obj.photos_after)
+
+
+@admin.register(CancelReasonOption)
+class CancelReasonOptionAdmin(admin.ModelAdmin):
+    list_display = ("id", "scope", "code", "label", "sort_order", "is_active")
+    list_filter = ("scope", "is_active")
+    search_fields = ("code", "label")
+    ordering = ("scope", "sort_order", "code")
 
 
 @admin.register(StaffUser)
