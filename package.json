@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "dev": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py runserver 0.0.0.0:3001'",
-    "db:reset": "bash -c 'echo \"PostgreSQL ishlatiladi: reset uchun DB'ni qayta yarating va migrate ishlating\"'",
+    "db:bootstrap": "bash scripts/bootstrap_local_postgres.sh",
+    "db:local:reset": "bash scripts/reset_local_db.sh",
     "migrate": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py migrate --noinput'",
     "check": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py check'",
     "admin:ensure": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py ensure_admin'",
