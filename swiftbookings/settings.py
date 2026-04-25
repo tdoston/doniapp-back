@@ -143,6 +143,15 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
+def _normalize_origin(origin: str) -> str:
+    """Ensure env-provided origin has scheme for Django 4+ checks."""
+    raw = origin.strip().rstrip("/")
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return f"https://{raw}"
+
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:8080",
@@ -153,7 +162,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8082",
 ]
 for _origin in os.environ.get("CORS_EXTRA_ORIGINS", "").split(","):
-    _o = _origin.strip()
+    _o = _normalize_origin(_origin)
     if _o and _o not in CORS_ALLOWED_ORIGINS:
         CORS_ALLOWED_ORIGINS.append(_o)
 
@@ -180,7 +189,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:8082",
 ]
 for _origin in os.environ.get("CSRF_TRUSTED_EXTRA", "").split(","):
-    _o = _origin.strip()
+    _o = _normalize_origin(_origin)
     if _o and _o not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS.append(_o)
 
