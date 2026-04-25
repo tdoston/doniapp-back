@@ -1172,5 +1172,17 @@ def cleaning_patch(request, room_code: str):
     vals.append(room_id)
     with connection.cursor() as c:
         _prune_old_cleaning_photos(c)
+        # Some deployments may miss a `room_cleaning` row for newly seeded/added rooms.
+        # Ensure row exists so fullTaken/fullTakenMode updates are never silently ignored.
+        c.execute(
+            """
+            INSERT INTO room_cleaning
+              (room_id, status, full_taken, full_taken_mode, photos_before, photos_after, updated_at)
+            VALUES
+              (%s, 'dirty', FALSE, '', '[]', '[]', CURRENT_TIMESTAMP)
+            ON CONFLICT (room_id) DO NOTHING
+            """,
+            [room_id],
+        )
         c.execute(f"UPDATE room_cleaning SET {', '.join(sets)} WHERE room_id = %s", vals)
     return JsonResponse({"ok": True, "updated": True})
