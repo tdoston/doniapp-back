@@ -157,6 +157,18 @@ for _origin in os.environ.get("CORS_EXTRA_ORIGINS", "").split(","):
     if _o and _o not in CORS_ALLOWED_ORIGINS:
         CORS_ALLOWED_ORIGINS.append(_o)
 
+# Railway: frontend va backend alohida `*.up.railway.app` bo‘lsa, CORS ro‘yxatida bo‘lmasa
+# brauzer `fetch`ni bloklaydi. `CORS_STRICT_RAILWAY=1` bo‘lsa regex qo‘llanmaydi.
+CORS_ALLOWED_ORIGIN_REGEXES: list[str] = []
+if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() and os.environ.get("CORS_STRICT_RAILWAY", "").strip().lower() not in (
+    "1",
+    "true",
+    "yes",
+):
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        r"^https://[a-zA-Z0-9.-]+\.up\.railway\.app$",
+    ]
+
 CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:3001",
     "http://localhost:3001",
