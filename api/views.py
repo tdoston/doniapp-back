@@ -1156,8 +1156,8 @@ def cleaning_patch(request, room_code: str):
         vals.append(json.dumps(body["photosAfter"][:20]))
     if "fullTaken" in body:
         sets.append("full_taken = %s")
-        vals.append(1 if bool(body.get("fullTaken")) else 0)
-        if not bool(body.get("fullTaken")):
+        vals.append(bool(body.get("fullTaken")))
+        if not bool(body.get("fullTaken")) and "fullTakenMode" not in body:
             sets.append("full_taken_mode = %s")
             vals.append("")
     if "fullTakenMode" in body:
