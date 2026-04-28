@@ -18,7 +18,7 @@ ROOM_SEED: list[tuple[str, str, str, int, bool]] = [
     ("Zargarlik", "z2", "2-xona 3 ta krovat", 3, False),
     ("Zargarlik", "z3", "3-xona 1 ta krovat", 1, True),
     ("Zargarlik", "z4", "4-xona 3 ta krovat", 3, False),
-    ("Tabarruk", "t1", "1-xona Dushli", 2, False),
+    ("Tabarruk", "t1", "1-xona Dushli", 3, False),
     ("Tabarruk", "t2", "2-xona Dushli", 2, False),
     ("Tabarruk", "t3", "3-xona", 2, False),
     ("Tabarruk", "t4", "4-xona", 2, False),
