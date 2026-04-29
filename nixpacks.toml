@@ -2,23 +2,18 @@
 PYTHONUNBUFFERED = "1"
 
 [phases.setup]
-# postgresql: `psql` client (bootstrap SQL uchun)
 nixPkgs = ["python311", "postgresql"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
 [phases.build]
-# 1) Biznes jadvallar (managed=False) — bo'sh DB uchun bir marta ham, keyingi deploylarda IF NOT EXISTS
-# 2) migrate (masalan api.0008: rooms.inactive + cancel_reason_options) — seed dan OLDIN bo'lishi shart
-# 3) seed_initial_db — inactive ustuni va katalog DBda bo'lgach (idempotent)
 cmds = [
-  "bash -c 'if [ -z \"$DATABASE_URL\" ]; then echo \"DATABASE_URL required: link Postgres plugin to this service\"; exit 1; fi'",
+  "bash -c 'if [ -z \"$DATABASE_URL\" ]; then echo \"ERROR: DATABASE_URL not set — link a Postgres service to this Railway service.\"; exit 1; fi'",
   "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f sql/postgres_bootstrap.sql",
   "python manage.py migrate --noinput",
-  "python manage.py seed_initial_db",
+  "python manage.py seed_defaults",
 ]
 
 [start]
-# Tartib: bootstrap -> migrate (0008 shu yerda) -> seed_initial_db -> gunicorn
-cmd = "bash -lc \"set -e; python manage.py bootstrap_postgres_schema && python manage.py migrate --noinput && python manage.py seed_initial_db && exec gunicorn swiftbookings.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 120\""
+cmd = "bash -lc \"set -e; python manage.py bootstrap_postgres_schema && python manage.py migrate --noinput && python manage.py seed_defaults && exec gunicorn swiftbookings.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 120\""

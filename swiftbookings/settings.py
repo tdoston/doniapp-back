@@ -1,88 +1,55 @@
 import os
 from pathlib import Path
-from urllib.parse import parse_qs, quote_plus, urlparse
 
+import dj_database_url
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-change-in-production")
+# ── Environment ──────────────────────────────────────────────────────────────
+# DJANGO_ENV: "local" | "staging" | "production"
+DJANGO_ENV = os.environ.get("DJANGO_ENV", "local").strip().lower()
 
-DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
+DEBUG = DJANGO_ENV == "local"
 
-ALLOWED_HOSTS = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if h.strip()]
+SECRET_KEY = os.environ.get(
+    "SECRET_KEY",
+    "dev-only-insecure-secret-change-in-staging-and-production",
+)
+
+# ── Hosts ────────────────────────────────────────────────────────────────────
+_raw_hosts = os.environ.get("ALLOWED_HOSTS", "127.0.0.1,localhost" if DEBUG else "").strip()
+ALLOWED_HOSTS: list[str] = [h.strip() for h in _raw_hosts.split(",") if h.strip()]
+
 _railway_public = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
 if _railway_public and _railway_public not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_railway_public)
-# Railway default URL: *.up.railway.app (Django — boshidagi nuqta bilan barcha subdomain)
-if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() and ".up.railway.app" not in ALLOWED_HOSTS:
+if DJANGO_ENV in ("staging", "production") and ".up.railway.app" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(".up.railway.app")
 
-def _database_from_url(url: str) -> dict:
-    if url.startswith("postgresql://") or url.startswith("postgres://"):
-        p = urlparse(url)
-        path = (p.path or "").lstrip("/")
-        q = parse_qs(p.query or "")
-        ssl_vals = q.get("sslmode") or []
-        sslmode = str(ssl_vals[0]).strip() if ssl_vals else ""
-        if not sslmode:
-            sslmode = os.environ.get("POSTGRES_SSLMODE", "").strip()
-        host_l = (p.hostname or "").lower()
-        # Railway TCP proxy — URL da sslmode bo‘lmasa, odatda SSL talab qilinadi
-        if not sslmode and "proxy.rlwy.net" in host_l:
-            sslmode = "require"
-        options: dict[str, str] = {}
-        if sslmode:
-            options["sslmode"] = sslmode
-        return {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": path or "swift_bookings",
-            "USER": p.username or "postgres",
-            "PASSWORD": p.password or "postgres",
-            "HOST": p.hostname or "127.0.0.1",
-            "PORT": str(p.port or 5432),
-            "CONN_MAX_AGE": 60,
-            **({"OPTIONS": options} if options else {}),
-        }
-    return {}
-
-
-# Railway: ichki tarmoqda `DATABASE_URL` (private). Lokal/tashqi: `DATABASE_PUBLIC_URL` yoki
-# `RAILWAY_TCP_PROXY_DOMAIN` + `RAILWAY_TCP_PROXY_PORT` + `POSTGRES_*`.
+# ── Database ─────────────────────────────────────────────────────────────────
 _db_url = (
     os.environ.get("DATABASE_URL", "").strip()
     or os.environ.get("DATABASE_PUBLIC_URL", "").strip()
 )
-_tcp_host = os.environ.get("RAILWAY_TCP_PROXY_DOMAIN", "").strip()
-_tcp_port = os.environ.get("RAILWAY_TCP_PROXY_PORT", "").strip()
-_pg_user = os.environ.get("POSTGRES_USER", "postgres").strip()
-_pg_pass = os.environ.get("POSTGRES_PASSWORD", "").strip()
-_pg_db = os.environ.get("POSTGRES_DB", "railway").strip()
-if not _db_url and _tcp_host and _pg_pass:
-    port = _tcp_port or "5432"
-    _db_url = (
-        f"postgresql://{quote_plus(_pg_user)}:{quote_plus(_pg_pass)}"
-        f"@{_tcp_host}:{port}/{_pg_db}?sslmode=require"
-    )
-if _db_url.startswith("postgresql://") or _db_url.startswith("postgres://"):
-    DATABASES = {"default": _database_from_url(_db_url)}
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB", "swift_bookings"),
-            "USER": os.environ.get("POSTGRES_USER", "postgres"),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "postgres"),
-            "HOST": os.environ.get("POSTGRES_HOST", "127.0.0.1"),
-            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
-            "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
-            "OPTIONS": {
-                "sslmode": os.environ.get("POSTGRES_SSLMODE", "prefer"),
-            },
-        }
-    }
 
+if not _db_url:
+    raise RuntimeError(
+        "DATABASE_URL is not set. "
+        "Link a Postgres service to this Railway service, or set DATABASE_URL in .env for local dev."
+    )
+
+DATABASES = {
+    "default": dj_database_url.config(
+        default=_db_url,
+        conn_max_age=60,
+        conn_health_checks=True,
+        ssl_require=DJANGO_ENV in ("staging", "production"),
+    )
+}
+
+# ── Apps ─────────────────────────────────────────────────────────────────────
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -100,6 +67,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
 }
 
+# ── Middleware ────────────────────────────────────────────────────────────────
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
@@ -131,71 +99,61 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "swiftbookings.wsgi.application"
-
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# ── Localisation ──────────────────────────────────────────────────────────────
 LANGUAGE_CODE = "uz"
 TIME_ZONE = "Asia/Tashkent"
 USE_I18N = True
 USE_TZ = True
 
+# ── Static ────────────────────────────────────────────────────────────────────
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
-def _normalize_origin(origin: str) -> str:
-    """Ensure env-provided origin has scheme for Django 4+ checks."""
-    raw = origin.strip().rstrip("/")
+# ── CORS ─────────────────────────────────────────────────────────────────────
+def _normalize_origin(o: str) -> str:
+    raw = o.strip().rstrip("/")
     if not raw:
         return ""
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return raw
-    return f"https://{raw}"
+    return raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG
-CORS_ALLOWED_ORIGINS = [
+CORS_ALLOWED_ORIGINS: list[str] = [
     "http://127.0.0.1:8080",
     "http://localhost:8080",
     "http://127.0.0.1:8081",
     "http://localhost:8081",
-    "http://127.0.0.1:8082",
-    "http://localhost:8082",
 ]
-for _origin in os.environ.get("CORS_EXTRA_ORIGINS", "").split(","):
-    _o = _normalize_origin(_origin)
-    if _o and _o not in CORS_ALLOWED_ORIGINS:
-        CORS_ALLOWED_ORIGINS.append(_o)
+for _o in os.environ.get("CORS_EXTRA_ORIGINS", "").split(","):
+    _norm = _normalize_origin(_o)
+    if _norm and _norm not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(_norm)
 
-# Railway: frontend va backend alohida `*.up.railway.app` bo‘lsa, CORS ro‘yxatida bo‘lmasa
-# brauzer `fetch`ni bloklaydi. `CORS_STRICT_RAILWAY=1` bo‘lsa regex qo‘llanmaydi.
 CORS_ALLOWED_ORIGIN_REGEXES: list[str] = []
-if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() and os.environ.get("CORS_STRICT_RAILWAY", "").strip().lower() not in (
-    "1",
-    "true",
-    "yes",
-):
-    CORS_ALLOWED_ORIGIN_REGEXES = [
-        r"^https://[a-zA-Z0-9.-]+\.up\.railway\.app$",
-    ]
+if DJANGO_ENV in ("staging", "production") and not os.environ.get("CORS_STRICT", "").strip():
+    CORS_ALLOWED_ORIGIN_REGEXES = [r"^https://[a-zA-Z0-9.-]+\.up\.railway\.app$"]
 
-CSRF_TRUSTED_ORIGINS = [
+# ── CSRF ──────────────────────────────────────────────────────────────────────
+CSRF_TRUSTED_ORIGINS: list[str] = [
     "http://127.0.0.1:3001",
     "http://localhost:3001",
     "http://127.0.0.1:8080",
     "http://localhost:8080",
-    "http://127.0.0.1:8081",
-    "http://localhost:8081",
-    "http://127.0.0.1:8082",
-    "http://localhost:8082",
 ]
-for _origin in os.environ.get("CSRF_TRUSTED_EXTRA", "").split(","):
-    _o = _normalize_origin(_origin)
-    if _o and _o not in CSRF_TRUSTED_ORIGINS:
-        CSRF_TRUSTED_ORIGINS.append(_o)
+for _o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(","):
+    _norm = _normalize_origin(_o)
+    if _norm and _norm not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_norm)
 
+if DJANGO_ENV in ("staging", "production"):
+    CSRF_TRUSTED_ORIGINS += [
+        "https://*.up.railway.app",
+    ]
+
+# ── Security (staging / production only) ─────────────────────────────────────
 DATA_UPLOAD_MAX_MEMORY_SIZE = 15 * 1024 * 1024
-
-# REST yo'llar: /api/board, /api/users/1, ...
 APPEND_SLASH = False
 
 if not DEBUG:
