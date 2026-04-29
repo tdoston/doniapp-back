@@ -34,6 +34,18 @@ _db_url = (
     or os.environ.get("DATABASE_PUBLIC_URL", "").strip()
 )
 
+# Log DB URL (host only, no password) to help diagnose Railway config issues
+import sys as _sys
+if _db_url:
+    try:
+        from urllib.parse import urlparse as _urlparse
+        _p = _urlparse(_db_url)
+        print(f"[settings] DB → host={_p.hostname} port={_p.port} db={_p.path} env={DJANGO_ENV}", file=_sys.stderr)
+    except Exception:
+        print(f"[settings] DB URL set but could not parse. env={DJANGO_ENV}", file=_sys.stderr)
+else:
+    print(f"[settings] DATABASE_URL is EMPTY. env={DJANGO_ENV}", file=_sys.stderr)
+
 if not _db_url:
     raise RuntimeError(
         "DATABASE_URL is not set. "
