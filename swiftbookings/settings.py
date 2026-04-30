@@ -81,10 +81,10 @@ REST_FRAMEWORK = {
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",  # must be first
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -125,27 +125,34 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
-def _normalize_origin(o: str) -> str:
-    raw = o.strip().rstrip("/")
-    if not raw:
-        return ""
-    return raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
+def _parse_origins(env_key: str) -> list[str]:
+    return [
+        o.strip().rstrip("/")
+        for o in os.environ.get(env_key, "").split(",")
+        if o.strip()
+    ]
 
-CORS_ALLOW_ALL_ORIGINS = DEBUG
-CORS_ALLOWED_ORIGINS: list[str] = [
-    "http://127.0.0.1:8080",
-    "http://localhost:8080",
-    "http://127.0.0.1:8081",
-    "http://localhost:8081",
+if DJANGO_ENV == "local":
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = _parse_origins("CORS_ALLOWED_ORIGINS") or [
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+    ]
+    # Fallback: allow any *.up.railway.app if no explicit list given
+    CORS_ALLOWED_ORIGIN_REGEXES: list[str] = (
+        [] if os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
+        else [r"^https://[a-zA-Z0-9.-]+\.up\.railway\.app$"]
+    )
+
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "authorization",
+    "content-type",
+    "x-csrftoken",
+    "x-requested-with",
 ]
-for _o in os.environ.get("CORS_EXTRA_ORIGINS", "").split(","):
-    _norm = _normalize_origin(_o)
-    if _norm and _norm not in CORS_ALLOWED_ORIGINS:
-        CORS_ALLOWED_ORIGINS.append(_norm)
-
-CORS_ALLOWED_ORIGIN_REGEXES: list[str] = []
-if DJANGO_ENV in ("staging", "production") and not os.environ.get("CORS_STRICT", "").strip():
-    CORS_ALLOWED_ORIGIN_REGEXES = [r"^https://[a-zA-Z0-9.-]+\.up\.railway\.app$"]
 
 # ── CSRF ──────────────────────────────────────────────────────────────────────
 CSRF_TRUSTED_ORIGINS: list[str] = [
@@ -154,15 +161,12 @@ CSRF_TRUSTED_ORIGINS: list[str] = [
     "http://127.0.0.1:8080",
     "http://localhost:8080",
 ]
-for _o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(","):
-    _norm = _normalize_origin(_o)
-    if _norm and _norm not in CSRF_TRUSTED_ORIGINS:
-        CSRF_TRUSTED_ORIGINS.append(_norm)
+for _o in _parse_origins("CSRF_TRUSTED_ORIGINS"):
+    if _o not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_o)
 
 if DJANGO_ENV in ("staging", "production"):
-    CSRF_TRUSTED_ORIGINS += [
-        "https://*.up.railway.app",
-    ]
+    CSRF_TRUSTED_ORIGINS.append("https://*.up.railway.app")
 
 # ── Security (staging / production only) ─────────────────────────────────────
 DATA_UPLOAD_MAX_MEMORY_SIZE = 15 * 1024 * 1024
