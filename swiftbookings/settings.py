@@ -126,11 +126,16 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
 def _parse_origins(env_key: str) -> list[str]:
-    return [
-        o.strip().rstrip("/")
-        for o in os.environ.get(env_key, "").split(",")
-        if o.strip()
-    ]
+    result = []
+    for o in os.environ.get(env_key, "").split(","):
+        o = o.strip().rstrip("/")
+        if not o:
+            continue
+        # Auto-add https:// if the value is a bare hostname (no scheme)
+        if not o.startswith("http://") and not o.startswith("https://"):
+            o = f"https://{o}"
+        result.append(o)
+    return result
 
 if DJANGO_ENV == "local":
     CORS_ALLOW_ALL_ORIGINS = True
