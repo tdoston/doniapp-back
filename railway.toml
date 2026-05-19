@@ -4,4 +4,5 @@ builder = "NIXPACKS"
 nixpacksConfigPath = "nixpacks.toml"
 
 [deploy]
-startCommand = "bash -lc \"set -e; python3 manage.py bootstrap_postgres_schema && python3 manage.py migrate --noinput && python3 manage.py seed_initial_db && exec gunicorn swiftbookings.wsgi:application --bind 0.0.0.0:${PORT:-8080} --workers 2 --threads 4 --timeout 120\""
+# Railpack: `.venv` ichidagi Python; migrate/seed build bosqichida (nixpacks.toml)
+startCommand = "bash -lc 'set -e; .venv/bin/python manage.py migrate --noinput && exec .venv/bin/python -m gunicorn swiftbookings.wsgi:application --bind 0.0.0.0:${PORT:-8080} --workers 2 --threads 4 --timeout 120'"
