@@ -1,5 +1,4 @@
-# doniapp-back — Railpack (default). NIXPACKS + `pip` ishlatilmaydi (pip: command not found).
-# Build: DATABASE_URL kerak. Start: bootstrap + migrate + gunicorn.
+# doniapp-back — Railpack. Build: collectstatic (DB yo'q). Start: bootstrap + migrate + seed + gunicorn.
 
 [build]
 buildCommand = "chmod +x scripts/railway_build.sh scripts/railway_start.sh && bash scripts/railway_build.sh"
