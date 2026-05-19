@@ -21,8 +21,8 @@ fi
 
 echo "[railway-build] DB → $(echo "$DATABASE_URL" | sed -E 's#(postgresql://[^:]+:)[^@]+#\1***#')"
 
-echo "[railway-build] 1/4 postgres_bootstrap.sql (psql)..."
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/postgres_bootstrap.sql
+echo "[railway-build] 1/4 bootstrap_postgres_schema (Django, psql shart emas)..."
+"$PY" manage.py bootstrap_postgres_schema
 
 echo "[railway-build] 2/4 migrate..."
 "$PY" manage.py migrate --noinput

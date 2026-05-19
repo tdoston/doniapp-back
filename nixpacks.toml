@@ -1,17 +1,6 @@
+# Railpack asosiy builder; faqat start fallback (deps + build — railway.toml).
 [variables]
 PYTHONUNBUFFERED = "1"
-
-[phases.setup]
-nixPkgs = ["python311", "postgresql"]
-
-[phases.install]
-cmds = ["pip install -r requirements.txt"]
-
-[phases.build]
-cmds = [
-  "chmod +x scripts/railway_build.sh scripts/railway_start.sh",
-  "bash scripts/railway_build.sh",
-]
 
 [start]
 cmd = "bash scripts/railway_start.sh"

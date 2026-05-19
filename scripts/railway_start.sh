@@ -15,6 +15,9 @@ fi
 export DJANGO_DEBUG="${DJANGO_DEBUG:-0}"
 PORT="${PORT:-8080}"
 
+echo "[railway-start] bootstrap_postgres_schema..."
+"$PY" manage.py bootstrap_postgres_schema
+
 echo "[railway-start] migrate..."
 "$PY" manage.py migrate --noinput
 
