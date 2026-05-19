@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS bed_bookings (
   notes TEXT NOT NULL DEFAULT '',
   photos TEXT NOT NULL DEFAULT '[]',
   checked_in_by VARCHAR(200) NOT NULL DEFAULT '',
+  telegram_channel_message_id BIGINT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP

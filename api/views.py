@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import logging
+import os
 import re
+import secrets
+import time
 import uuid
 from datetime import date
 from typing import Any
+from urllib import parse, request
+from urllib.error import HTTPError, URLError
 
 import bcrypt
 from django.db import connection, transaction
 from django.db.utils import IntegrityError
 from django.http import JsonResponse
+from django.core import signing
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
@@ -28,6 +38,1003 @@ from .id_ocr import parse_document_fields_from_photo, parse_document_fields_from
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LOGIN_RE = re.compile(r"^[a-z0-9._-]+$", re.I)
 CLEANING_PHOTO_RETENTION_DAYS = 5
+TELEGRAM_API_BASE = "https://api.telegram.org"
+AUTH_TOKEN_SALT = "swift-bookings-auth-v1"
+AUTH_TOKEN_MAX_AGE_SEC = 60 * 60 * 24 * 30
+
+logger = logging.getLogger(__name__)
+
+
+def _tg_html(s: str) -> str:
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _telegram_caption_html_trim(html: str, max_len: int = 1024) -> str:
+    """Telegram photo/media caption — maks. 1024 belgi."""
+    t = (html or "").strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
+
+
+_TG_NOTES_EMBEDDED_CONTACT = re.compile(
+    r"^(Telefon|Pasport/guvohnoma|Hujjat):\s",
+    re.I,
+)
+
+
+def _telegram_notes_without_embedded_contact(notes: str) -> str:
+    """`formatNotesWithContactDetails` qo'shgan qatorlar — kanalda takror bo'lmasin (📞/🪪 allaqachon bor)."""
+    lines_out: list[str] = []
+    for line in (notes or "").split("\n"):
+        t = line.strip()
+        if not t:
+            lines_out.append("")
+            continue
+        if _TG_NOTES_EMBEDDED_CONTACT.match(t):
+            continue
+        lines_out.append(line.rstrip())
+    text = "\n".join(lines_out)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def _super_admin_tg_ids() -> set[int]:
+    raw = str(os.environ.get("SUPER_ADMIN_TELEGRAM_IDS", "") or "").strip()
+    out: set[int] = set()
+    if not raw:
+        return out
+    for p in raw.split(","):
+        s = p.strip()
+        if not s:
+            continue
+        try:
+            out.add(int(s))
+        except ValueError:
+            continue
+    return out
+
+
+def _ensure_users_auth_schema(cursor: Any) -> None:
+    cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_user_id BIGINT")
+    cursor.execute(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(20) NOT NULL DEFAULT 'password'"
+    )
+    cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT")
+    cursor.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND indexname = 'users_telegram_user_id_uq'
+            ) THEN
+                EXECUTE 'CREATE UNIQUE INDEX users_telegram_user_id_uq ON users (telegram_user_id) WHERE telegram_user_id IS NOT NULL';
+            END IF;
+        END $$;
+        """
+    )
+    cursor.execute(
+        """
+        DO $$
+        DECLARE c_name text;
+        BEGIN
+            SELECT conname INTO c_name
+            FROM pg_constraint
+            WHERE conrelid = 'users'::regclass
+              AND contype = 'c'
+              AND pg_get_constraintdef(oid) ILIKE '%%role%%';
+            IF c_name IS NOT NULL THEN
+                EXECUTE format('ALTER TABLE users DROP CONSTRAINT %I', c_name);
+            END IF;
+            ALTER TABLE users
+              ADD CONSTRAINT users_role_check CHECK (role IN ('super_admin', 'admin', 'staff'));
+        EXCEPTION WHEN duplicate_object THEN
+            NULL;
+        END $$;
+        """
+    )
+
+
+def _telegram_post(token: str, method: str, payload: dict[str, Any], *, timeout_sec: float = 8.0) -> int | None:
+    ok, _desc, mid = _telegram_api_request(token, method, payload, timeout_sec=timeout_sec)
+    return mid if ok else None
+
+
+def _telegram_api_request(
+    token: str, method: str, payload: dict[str, Any], *, timeout_sec: float = 8.0
+) -> tuple[bool, str, int | None]:
+    """Telegram Bot API chaqiruvi. (muvaffaqiyat, tavsif yoki xato matni, message_id)."""
+    if "parse_mode" not in payload and method in ("sendMessage", "sendPhoto"):
+        payload = {**payload, "parse_mode": "HTML"}
+    # JSON POST — uzun matn / UTF-8 uchun urlencoded qatoriga nisbatan ishonchliroq
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = request.Request(
+        f"{TELEGRAM_API_BASE}/bot{token}/{method}",
+        data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=timeout_sec) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                return False, f"HTTP {resp.status}", None
+            raw = resp.read().decode("utf-8")
+    except HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8")
+        except Exception:
+            err_body = str(e)
+        return False, err_body or str(e), None
+    except (URLError, TimeoutError, OSError, ValueError) as e:
+        return False, str(e), None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False, "Invalid JSON from Telegram", None
+    if not data.get("ok"):
+        desc = str(data.get("description") or data.get("error_code") or data)
+        return False, desc, None
+    result = data.get("result") or {}
+    mid = result.get("message_id")
+    return True, "ok", int(mid) if mid is not None else None
+
+
+def _telegram_notify_chat_id() -> str:
+    """Kanal yoki guruh: @mychannel yoki -100… ID. Bir nechta env nomlari qo‘llab-quvvatlanadi."""
+    for key in (
+        "TELEGRAM_NOTIFY_CHAT_ID",
+        "TELEGRAM_CHANNEL_CHAT_ID",
+        "TELEGRAM_CHANNEL_ID",
+        "TELEGRAM_CHANNEL_ID_TEST",
+    ):
+        v = str(os.environ.get(key, "") or "").strip()
+        if v:
+            return v
+    return ""
+
+
+_channel_id_missing_logged = False
+
+
+def _telegram_send_channel_html(text: str) -> int | None:
+    """Kanalga matn. Muvaffaqiyatda `message_id`, aks holda None."""
+    global _channel_id_missing_logged
+    token = str(os.environ.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
+    chat_id = _telegram_notify_chat_id()
+    if not token:
+        return None
+    if not chat_id:
+        if not _channel_id_missing_logged:
+            logger.warning(
+                "Telegram kanal: TELEGRAM_NOTIFY_CHAT_ID / TELEGRAM_CHANNEL_CHAT_ID / "
+                "TELEGRAM_CHANNEL_ID (yoki lokalda TELEGRAM_CHANNEL_ID_TEST) "
+                "o'rnatilmagan — kanalga xabar yuborilmaydi. .env tekshiring."
+            )
+            _channel_id_missing_logged = True
+        return None
+    t = (text or "").strip()
+    if not t:
+        return None
+    if len(t) > 4000:
+        t = t[:3997] + "…"
+    ok, desc, mid = _telegram_api_request(
+        token,
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": t,
+            "disable_web_page_preview": True,
+        },
+    )
+    if not ok:
+        logger.error("Telegram kanalga yuborib bo'lmadi: %s", desc)
+        return None
+    return mid
+
+
+def _telegram_send_channel_html_reply(reply_to_message_id: int, text: str) -> int | None:
+    """Asl kanal postiga reply (patch diff)."""
+    ctx = _telegram_channel_ready()
+    if not ctx or reply_to_message_id <= 0:
+        return None
+    token, chat_id = ctx
+    t = (text or "").strip()
+    if not t:
+        return None
+    if len(t) > 4000:
+        t = t[:3997] + "…"
+    ok, desc, mid = _telegram_api_request(
+        token,
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": t,
+            "reply_to_message_id": int(reply_to_message_id),
+            "disable_web_page_preview": True,
+        },
+    )
+    if not ok:
+        logger.error("Telegram kanal reply yuborib bo'lmadi: %s", desc)
+        return None
+    return mid
+
+
+def _telegram_channel_ready() -> tuple[str, str] | None:
+    token = str(os.environ.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
+    chat_id = _telegram_notify_chat_id()
+    if not token or not chat_id:
+        return None
+    return token, chat_id
+
+
+def _mime_to_image_ext(mime: str) -> str:
+    m = (mime or "").lower()
+    if "png" in m:
+        return "png"
+    if "webp" in m:
+        return "webp"
+    if "gif" in m:
+        return "gif"
+    return "jpg"
+
+
+def _fetch_image_url(url: str, *, max_bytes: int = 10 * 1024 * 1024) -> tuple[bytes, str] | None:
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        req = request.Request(url, headers={"User-Agent": "SwiftBookings/1"})
+        with request.urlopen(req, timeout=25) as resp:
+            ctype = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
+            data = resp.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                return None
+            return data, ctype or "image/jpeg"
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+        return None
+
+
+def _parse_booking_image_payload(raw: str) -> tuple[bytes, str] | None:
+    """data: URL (base64) yoki ochiq HTTP(S) rasm."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if s.startswith("data:"):
+        try:
+            head, b64part = s.split(",", 1)
+            mime = "image/jpeg"
+            meta = head[5:].split(";")[0].strip()
+            if meta:
+                mime = meta
+            raw_bytes = base64.b64decode(b64part, validate=False)
+            if not raw_bytes:
+                return None
+            return raw_bytes, mime
+        except (ValueError, TypeError, base64.binascii.Error):
+            return None
+    return _fetch_image_url(s)
+
+
+def _telegram_multipart_request(
+    token: str,
+    method: str,
+    string_fields: dict[str, str],
+    file_fields: list[tuple[str, str, bytes, str]],
+    *,
+    timeout_sec: float = 90.0,
+) -> tuple[bool, str, int | None]:
+    boundary = f"----SwiftBk{uuid.uuid4().hex}"
+    crlf = b"\r\n"
+    parts: list[bytes] = []
+    for k, v in string_fields.items():
+        parts.append(f"--{boundary}".encode("ascii") + crlf)
+        parts.append(f'Content-Disposition: form-data; name="{k}"'.encode("ascii") + crlf + crlf)
+        parts.append(v.encode("utf-8") + crlf)
+    for field_name, filename, content, ctype in file_fields:
+        parts.append(f"--{boundary}".encode("ascii") + crlf)
+        cd = f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"'
+        parts.append(cd.encode("utf-8") + crlf)
+        parts.append(f"Content-Type: {ctype}".encode("ascii") + crlf + crlf)
+        parts.append(content + crlf)
+    parts.append(f"--{boundary}--".encode("ascii") + crlf)
+    body = b"".join(parts)
+    req = request.Request(
+        f"{TELEGRAM_API_BASE}/bot{token}/{method}",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=timeout_sec) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                return False, f"HTTP {resp.status}", None
+            raw = resp.read().decode("utf-8")
+    except HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8")
+        except Exception:
+            err_body = str(e)
+        return False, err_body or str(e), None
+    except (URLError, TimeoutError, OSError, ValueError) as e:
+        return False, str(e), None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False, "Invalid JSON from Telegram", None
+    if not data.get("ok"):
+        desc = str(data.get("description") or data.get("error_code") or data)
+        return False, desc, None
+    result = data.get("result")
+    if isinstance(result, list) and result:
+        mid = (result[0] or {}).get("message_id") if isinstance(result[0], dict) else None
+        return True, "ok", int(mid) if mid is not None else None
+    if isinstance(result, dict):
+        mid = result.get("message_id")
+        return True, "ok", int(mid) if mid is not None else None
+    return True, "ok", None
+
+
+def _telegram_send_channel_booking_images(caption_html: str, urls: list[str]) -> tuple[bool, int | None]:
+    """Bitta sendPhoto yoki sendMediaGroup (maks. 3 rasm). Qaytadi: (ok, message_id — reply uchun birinchi post)."""
+    ctx = _telegram_channel_ready()
+    if not ctx or not urls:
+        return False, None
+    token, chat_id = ctx
+    blobs: list[tuple[bytes, str]] = []
+    for u in urls[:3]:
+        got = _parse_booking_image_payload(str(u))
+        if got:
+            blobs.append(got)
+    if not blobs:
+        logger.warning("Telegram kanal: hujjat rasmlari decode qilinmadi (data URL / HTTPS tekshiring)")
+        return False, None
+    cap = _telegram_caption_html_trim(caption_html)
+    chunk = blobs[:3]
+
+    if len(chunk) == 1:
+        b, mime = chunk[0]
+        ext = _mime_to_image_ext(mime)
+        fields: dict[str, str] = {
+            "chat_id": chat_id,
+            "caption": cap,
+            "parse_mode": "HTML",
+        }
+        ok, desc, mid = _telegram_multipart_request(
+            token,
+            "sendPhoto",
+            fields,
+            [("photo", f"doc.{ext}", b, mime or "image/jpeg")],
+        )
+        if not ok:
+            logger.error("Telegram kanal sendPhoto: %s", desc)
+            return False, None
+        return True, mid
+
+    media: list[dict[str, Any]] = []
+    file_fields: list[tuple[str, str, bytes, str]] = []
+    for j, (b, mime) in enumerate(chunk):
+        attach = f"f{j}"
+        ext = _mime_to_image_ext(mime)
+        item: dict[str, Any] = {"type": "photo", "media": f"attach://{attach}"}
+        if j == 0:
+            item["caption"] = cap
+            item["parse_mode"] = "HTML"
+        media.append(item)
+        file_fields.append((attach, f"p{j}.{ext}", b, mime or "image/jpeg"))
+    ok, desc, mid = _telegram_multipart_request(
+        token,
+        "sendMediaGroup",
+        {"chat_id": chat_id, "media": json.dumps(media)},
+        file_fields,
+    )
+    if not ok:
+        logger.error("Telegram kanal sendMediaGroup: %s", desc)
+        return False, None
+    return True, mid
+
+
+def _room_display_label(hostel_name: str, room_code: str) -> str:
+    with connection.cursor() as c:
+        c.execute(
+            """
+            SELECT COALESCE(r.name, r.code, '')
+            FROM rooms r
+            JOIN hostels h ON h.id = r.hostel_id
+            WHERE h.name = %s AND r.code = %s
+            LIMIT 1
+            """,
+            [hostel_name, room_code],
+        )
+        row = c.fetchone()
+    if row and str(row[0] or "").strip():
+        return str(row[0]).strip()
+    return room_code
+
+
+def _money_uz_spaced(val: Any) -> str:
+    """76000 → \"76 000\" (mingliklar orasida bo'shliq)."""
+    s = _money_int_text(val)
+    try:
+        n = int(s)
+    except ValueError:
+        n = 0
+    return f"{n:,}".replace(",", " ")
+
+
+def _booking_channel_display_id(check_in_date: str, booking_uuid: str) -> str:
+    """Kanal xabari: YYMMDD-qisqa (masalan: 260507-92923)."""
+    d = (check_in_date or "").strip()[:10]
+    prefix = "000000"
+    if len(d) == 10 and d[4] == "-" and d[7] == "-":
+        try:
+            y, m, dd = (int(d[0:4]), int(d[5:7]), int(d[8:10]))
+            prefix = f"{y % 100:02d}{m:02d}{dd:02d}"
+        except ValueError:
+            pass
+    uid = booking_uuid or ""
+    digits = "".join(ch for ch in uid if ch.isdigit())
+    if len(digits) >= 5:
+        tail = digits[-5:]
+    else:
+        h = "".join(ch for ch in uid if ch.isalnum()).lower()
+        tail = h[-5:] if len(h) >= 5 else (h or "00000")
+    return f"{prefix}-{tail}"
+
+
+def _notify_channel_room_place_line(hostel: str, room_code: str) -> str:
+    label = _room_display_label(hostel, room_code)
+    rc = (room_code or "").strip()
+    if not label or label == rc:
+        return f"{_tg_html(hostel)} · {_tg_html(rc)}"
+    return f"{_tg_html(hostel)} · {_tg_html(label)} · {_tg_html(rc)}"
+
+
+def _ensure_bed_bookings_telegram_channel_message_id_column(cursor: Any) -> None:
+    cursor.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'bed_bookings'
+          AND column_name = 'telegram_channel_message_id'
+        LIMIT 1
+        """
+    )
+    if cursor.fetchone():
+        return
+    cursor.execute(
+        "ALTER TABLE bed_bookings ADD COLUMN telegram_channel_message_id BIGINT NULL"
+    )
+
+
+def _booking_photos_sig(raw: str) -> str:
+    try:
+        j = json.loads(raw or "[]")
+        if isinstance(j, list):
+            return json.dumps([str(x) for x in j if isinstance(x, str)], ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return raw or ""
+
+
+def _booking_telegram_snapshot_row(
+    check_in_date: Any,
+    nights: Any,
+    guest_name: Any,
+    guest_phone: Any,
+    price: Any,
+    paid: Any,
+    notes: Any,
+    photos: Any,
+    checked_in_by: Any,
+    booking_kind_raw: Any,
+) -> dict[str, Any]:
+    try:
+        ni = int(nights)
+    except (TypeError, ValueError):
+        ni = 1
+    if ni < 1:
+        ni = 1
+    return {
+        "check_in_date": str(check_in_date or "")[:10],
+        "nights": ni,
+        "guest_name": str(guest_name or ""),
+        "guest_phone": str(guest_phone or ""),
+        "price": int(_money_int_text(price)),
+        "paid": int(_money_int_text(paid)),
+        "notes": _telegram_notes_without_embedded_contact(str(notes or "")),
+        "photos": _booking_photos_sig(str(photos or "[]")),
+        "checked_in_by": str(checked_in_by or ""),
+        "booking_kind": str(booking_kind_raw or "check_in").strip().lower(),
+    }
+
+
+def _booking_channel_patch_reply_html(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    booking_uuid: str,
+    who_line_html: str,
+) -> str:
+    """Kanal postiga reply uchun o'zgarishlar matni (HTML). Bo'sh — yuborilmasin."""
+    lines: list[str] = []
+    cid = _booking_channel_display_id(str(after.get("check_in_date") or ""), booking_uuid)
+
+    if str(before.get("check_in_date")) != str(after.get("check_in_date")):
+        lines.append(
+            f"• 📅 Sana: {_tg_html(str(before['check_in_date']))} → {_tg_html(str(after['check_in_date']))}"
+        )
+    if int(before.get("nights") or 1) != int(after.get("nights") or 1):
+        lines.append(
+            f"• 🌙 Tunlar: {int(before.get('nights') or 1)} → <b>{int(after.get('nights') or 1)} tun</b>"
+        )
+
+    nb, na = int(before.get("nights") or 1), int(after.get("nights") or 1)
+    pb, pa = int(before.get("price") or 0), int(after.get("price") or 0)
+    payb, paya = int(before.get("paid") or 0), int(after.get("paid") or 0)
+    debt_b = max(0, pb * nb - payb)
+    debt_a = max(0, pa * na - paya)
+    money_changed = pb != pa or payb != paya or nb != na
+    if money_changed:
+        lines.append(
+            f"• 💰 Narx: {_money_uz_spaced(pb)} → {_money_uz_spaced(pa)} so'm"
+        )
+        lines.append(
+            f"• 💳 To'langan: {_money_uz_spaced(payb)} → {_money_uz_spaced(paya)} so'm"
+        )
+        lines.append(
+            f"• 📉 Qarz: {_money_uz_spaced(debt_b)} → {_money_uz_spaced(debt_a)} so'm"
+        )
+        if debt_a == 0 and debt_b > 0:
+            lines.append("✅ <b>To'liq to'langan</b>")
+
+    if str(before.get("guest_name") or "") != str(after.get("guest_name") or ""):
+        lines.append(
+            f"• 👤 Mehmon: {_tg_html(str(before.get('guest_name') or '—'))} → "
+            f"{_tg_html(str(after.get('guest_name') or '—'))}"
+        )
+
+    gpb, gpa = str(before.get("guest_phone") or ""), str(after.get("guest_phone") or "")
+    if gpb != gpa:
+        b_disp = _tg_html(format_guest_contact(gpb) or gpb[:40] or "—")
+        a_disp = _tg_html(format_guest_contact(gpa) or gpa[:40] or "—")
+        lines.append(f"• 📞 Telefon: {b_disp} → {a_disp}")
+
+    notes_b = str(before.get("notes") or "")
+    notes_a = str(after.get("notes") or "")
+    if notes_b != notes_a:
+
+        def _trunc_note(s: str, n: int = 100) -> str:
+            s = (s or "").strip()
+            return s if len(s) <= n else s[: n - 1] + "…"
+
+        lines.append(
+            f"• 📝 Izoh: {_tg_html(_trunc_note(notes_b))} → {_tg_html(_trunc_note(notes_a))}"
+        )
+
+    if str(before.get("photos") or "") != str(after.get("photos") or ""):
+        lines.append("• 🖼 Hujjat rasmlari yangilandi")
+
+    kb, ka = str(before.get("booking_kind") or "check_in"), str(after.get("booking_kind") or "check_in")
+    if kb != ka:
+        if kb == "bron" and ka == "check_in":
+            lines.append("• Tur: 🟠 Bron → 🟢 Check-in")
+        else:
+            lines.append(f"• Tur: {_tg_html(kb)} → {_tg_html(ka)}")
+
+    cb, ca = str(before.get("checked_in_by") or ""), str(after.get("checked_in_by") or "")
+    if cb != ca:
+        lines.append(
+            f"• 👨‍💼 Administrator: {_tg_html(cb or '—')} → {_tg_html(ca or '—')}"
+        )
+
+    if not lines:
+        return ""
+
+    header = f"🔄 <b>Yangilanish</b> 🆔 <code>{_tg_html(cid)}</code>"
+    parts = [header, *lines]
+    if who_line_html:
+        parts.append(who_line_html)
+    return "\n".join(parts)
+
+
+def _notify_booking_channel_after_create(
+    *,
+    hostel: str,
+    room_code: str,
+    check_in_date: str,
+    nights: int,
+    checked_in_by: str,
+    lines: list[dict[str, Any]],
+    inserted_ids: list[str],
+    resolved_lines: list[tuple[str | None, str, str, str | None]],
+) -> None:
+    if len(inserted_ids) != len(lines) or len(resolved_lines) != len(lines):
+        return
+    with connection.cursor() as _c0:
+        _ensure_bed_bookings_telegram_channel_message_id_column(_c0)
+    for line, bid, triple in zip(lines, inserted_ids, resolved_lines):
+        _ik, phone_raw, passport_raw, convert_booking_id = triple
+        raw_kind = str(line.get("bookingKind") or line.get("booking_kind") or "check_in").lower()
+        is_bron = raw_kind == "bron"
+        ln = line.get("nights")
+        line_nights = int(ln) if isinstance(ln, int) and 1 <= ln <= 365 else nights
+        guest_name_raw = str(line.get("guestName") or "").strip()
+        guest_line = _tg_html(guest_name_raw) if guest_name_raw else "—"
+
+        if is_bron:
+            title = "🟠 Bron"
+        else:
+            title = "🟢 Check-in"
+
+        loc = _notify_channel_room_place_line(hostel, room_code)
+        date_line = f"📅 {_tg_html(check_in_date)} · <b>{line_nights} tun</b>"
+
+        p = int(_money_int_text(line.get("price", "")))
+        pd_amt = int(_money_int_text(line.get("paid", "")))
+        debt = max(0, p * line_nights - pd_amt)
+        narx = _money_uz_spaced(p)
+        tolangan = _money_uz_spaced(pd_amt)
+        qarz = _money_uz_spaced(debt)
+
+        compact_id = _booking_channel_display_id(check_in_date, bid)
+
+        pnd = normalize_phone_digits(phone_raw)
+        tel_disp = _tg_html(format_phone(pnd)) if pnd else "—"
+
+        ps = normalize_passport_series(passport_raw)
+        pass_disp = _tg_html(ps) if ps else "—"
+
+        adm = (checked_in_by or "").strip()
+        admin_disp = _tg_html(adm) if adm else "—"
+
+        notes = _telegram_notes_without_embedded_contact(str(line.get("notes") or ""))
+        izoh_disp = _tg_html(notes) if notes else "—"
+
+        header_lines = [
+            title,
+            f"👤 {guest_line}",
+            f"📍 {loc}",
+            date_line,
+            "",
+            "💰 Pul",
+            f"   Narx: {narx} so'm",
+            f"   To'langan: {tolangan} so'm",
+            f"   Qarz: {qarz} so'm",
+        ]
+        detail_lines = [
+            "📋 <b>Batafsil</b>",
+            f"🆔 ID: {_tg_html(compact_id)}",
+            f"📞 Telefon: {tel_disp}",
+            f"🪪 Pasport: {pass_disp}",
+            f"👨‍💼 Administrator: {admin_disp}",
+            f"📝 Izoh: {izoh_disp}",
+        ]
+        if is_bron or convert_booking_id:
+            ea = str(line.get("expectedArrival") or "").strip()
+            if ea:
+                detail_lines.append(f"⏰ Kelish: {_tg_html(ea[:120])}")
+        detail_text = "\n".join(detail_lines)
+        block_text = (
+            "\n".join(header_lines)
+            + "\n\n<blockquote expandable>\n"
+            + detail_text
+            + "\n</blockquote>"
+        )
+
+        photos_in = line.get("photos") if isinstance(line.get("photos"), list) else []
+        photo_urls = [str(u) for u in photos_in if isinstance(u, str) and u.strip()][:3]
+        mid: int | None = None
+        try:
+            if photo_urls:
+                ok_img, root_mid = _telegram_send_channel_booking_images(block_text, photo_urls)
+                mid = root_mid if ok_img and root_mid else _telegram_send_channel_html(block_text)
+            else:
+                mid = _telegram_send_channel_html(block_text)
+        except Exception:
+            logger.exception("Telegram kanal bron/check-in xabari")
+            try:
+                mid = _telegram_send_channel_html(block_text)
+            except Exception:
+                logger.exception("Telegram kanal matn zaxirasi")
+                mid = None
+        if mid:
+            try:
+                with connection.cursor() as cu:
+                    _ensure_bed_bookings_telegram_channel_message_id_column(cu)
+                    cu.execute(
+                        "UPDATE bed_bookings SET telegram_channel_message_id = %s WHERE id = %s",
+                        [int(mid), bid],
+                    )
+            except Exception:
+                logger.exception("telegram_channel_message_id saqlanmadi")
+
+
+def _notify_booking_channel_cancelled(
+    *,
+    hostel: str,
+    room_code: str,
+    room_name: str,
+    bed_index: int,
+    guest_name: str,
+    booking_kind: str,
+    reason: str,
+    booking_id: str,
+) -> None:
+    kind_uz = "Bron" if booking_kind == "bron" else "Check-in"
+    room_disp = (room_name or "").strip() or room_code
+    text = "\n".join(
+        [
+            f"<b>⛔ Bekor qilindi</b> ({_tg_html(kind_uz)})",
+            f"📍 {_tg_html(hostel)} · 🚪 {_tg_html(room_disp)} <code>({ _tg_html(room_code) })</code>",
+            f"🛏 K<code>{int(bed_index)}</code>",
+            f"👤 {_tg_html(guest_name or '—')}",
+            f"📋 Sabab: {_tg_html(reason)}",
+            f"🆔 <code>{_tg_html(str(booking_id)[:36])}</code>",
+        ]
+    )
+    _telegram_send_channel_html(text)
+
+
+def _telegram_validate_init_data(init_data_raw: str, bot_token: str) -> dict[str, Any] | None:
+    parts = parse.parse_qsl(init_data_raw or "", keep_blank_values=True)
+    if not parts:
+        return None
+    kv: dict[str, str] = {}
+    recv_hash = ""
+    for k, v in parts:
+        if k == "hash":
+            recv_hash = v
+        else:
+            kv[k] = v
+    if not recv_hash:
+        return None
+    data_check_string = "\n".join(f"{k}={kv[k]}" for k in sorted(kv.keys()))
+    secret = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+    calc_hash = hmac.new(secret, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc_hash, recv_hash):
+        return None
+    user_raw = kv.get("user", "")
+    if not user_raw:
+        return None
+    try:
+        user_obj = json.loads(user_raw)
+    except Exception:
+        return None
+    if not isinstance(user_obj, dict):
+        return None
+    uid = user_obj.get("id")
+    if uid is None:
+        return None
+    try:
+        user_obj["id"] = int(uid)
+    except Exception:
+        return None
+    return user_obj
+
+
+def _telegram_validate_login_widget_payload(payload: dict[str, Any], bot_token: str) -> dict[str, Any] | None:
+    recv_hash = str(payload.get("hash") or "").strip()
+    if not recv_hash:
+        return None
+    safe_fields: dict[str, str] = {}
+    for key in ("id", "first_name", "last_name", "username", "photo_url", "auth_date"):
+        v = payload.get(key)
+        if v is None:
+            continue
+        safe_fields[key] = str(v)
+    if "id" not in safe_fields or "auth_date" not in safe_fields:
+        return None
+    data_check_string = "\n".join(f"{k}={safe_fields[k]}" for k in sorted(safe_fields.keys()))
+    secret_key = hashlib.sha256(bot_token.encode("utf-8")).digest()
+    calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc_hash, recv_hash):
+        return None
+    try:
+        auth_date = int(safe_fields["auth_date"])
+    except Exception:
+        return None
+    if auth_date <= 0 or (int(time.time()) - auth_date) > (24 * 60 * 60):
+        return None
+    try:
+        uid = int(safe_fields["id"])
+    except Exception:
+        return None
+    return {
+        "id": uid,
+        "first_name": safe_fields.get("first_name", ""),
+        "last_name": safe_fields.get("last_name", ""),
+        "username": safe_fields.get("username", ""),
+        "photo_url": safe_fields.get("photo_url", ""),
+    }
+
+
+def _telegram_notify_super_admin_access_request(*, tg_id: int, display_name: str, username: str) -> None:
+    token = str(os.environ.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
+    admin_ids = _super_admin_tg_ids()
+    if not token or not admin_ids:
+        return
+    uname = f"@{username}" if username else "-"
+    text = (
+        "🛡 Yangi kirish so'rovi\n"
+        f"👤 Ism: {_tg_html(display_name or '-')}\n"
+        f"🔹 Username: {_tg_html(uname)}\n"
+        f"🆔 Telegram ID: <code>{int(tg_id)}</code>\n\n"
+        "Tasdiqlash uchun ilovada `Profile → Jamoa` bo'limidan userni faol qiling."
+    )
+    for admin_id in admin_ids:
+        try:
+            _telegram_post(token, "sendMessage", {"chat_id": str(admin_id), "text": text})
+        except Exception:
+            continue
+    ch = (
+        "<b>🛡 Yangi kirish so'rovi (Telegram)</b>\n"
+        f"👤 {_tg_html(display_name or '-')}\n"
+        f"🔹 {_tg_html(uname)}\n"
+        f"🆔 <code>{int(tg_id)}</code>\n"
+        "Jamoada foydalanuvchini <b>faol</b> qiling."
+    )
+    _telegram_send_channel_html(ch)
+
+
+def _auth_token_issue(payload: dict[str, Any]) -> str:
+    return signing.dumps(payload, salt=AUTH_TOKEN_SALT, compress=True)
+
+
+def _auth_token_parse(token: str) -> dict[str, Any] | None:
+    try:
+        obj = signing.loads(token, salt=AUTH_TOKEN_SALT, max_age=AUTH_TOKEN_MAX_AGE_SEC)
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _request_auth(req) -> dict[str, Any] | None:
+    h = str(req.META.get("HTTP_AUTHORIZATION") or "").strip()
+    if not h.lower().startswith("bearer "):
+        return None
+    tok = h[7:].strip()
+    if not tok:
+        return None
+    return _auth_token_parse(tok)
+
+
+def _require_auth(req) -> tuple[dict[str, Any] | None, JsonResponse | None]:
+    auth = _request_auth(req)
+    if auth is None:
+        return None, JsonResponse({"error": "Unauthorized"}, status=401)
+    return auth, None
+
+
+def _require_super_admin(req) -> tuple[dict[str, Any] | None, JsonResponse | None]:
+    auth, err = _require_auth(req)
+    if err:
+        return None, err
+    role = str((auth or {}).get("role") or "")
+    if role != "super_admin":
+        return None, JsonResponse({"error": "Forbidden"}, status=403)
+    return auth, None
+
+
+def _auth_telegram_upsert_and_issue(
+    *, tg_id: int, display_name: str, username: str, preferred_role: str, photo_url: str = ""
+) -> JsonResponse:
+    role = preferred_role if preferred_role in ("super_admin", "admin", "staff") else "staff"
+    with connection.cursor() as c:
+        _ensure_users_auth_schema(c)
+        c.execute(
+            """
+            SELECT id, role, display_name, active
+            FROM users
+            WHERE telegram_user_id = %s
+            LIMIT 1
+            """,
+            [tg_id],
+        )
+        row = c.fetchone()
+        if row:
+            user_id = int(row[0])
+            db_role = str(row[1] or "staff")
+            db_active = bool(row[3])
+            effective_role = "super_admin" if role == "super_admin" else db_role
+            if not db_active:
+                if role == "super_admin":
+                    c.execute(
+                        """
+                        UPDATE users
+                        SET display_name = %s,
+                            auth_provider = 'telegram',
+                            role = 'super_admin',
+                            active = TRUE
+                        WHERE id = %s
+                        """,
+                        [display_name, user_id],
+                    )
+                    effective_role = "super_admin"
+                else:
+                    _telegram_notify_super_admin_access_request(
+                        tg_id=tg_id, display_name=display_name, username=username
+                    )
+                    return JsonResponse(
+                        {"error": "So'rov yuborildi. SuperAdminga murojaat qiling."}, status=403
+                    )
+            c.execute(
+                """
+                UPDATE users
+                SET display_name = %s,
+                    auth_provider = 'telegram',
+                    role = %s,
+                    avatar_url = CASE
+                        WHEN (avatar_url IS NULL OR avatar_url = '') THEN %s
+                        ELSE avatar_url
+                    END
+                WHERE id = %s
+                """,
+                [display_name, effective_role, photo_url or None, user_id],
+            )
+            role = effective_role
+        else:
+            login_seed = username or f"tg_{tg_id}"
+            login_seed = re.sub(r"[^a-z0-9._-]+", "_", login_seed).strip("_") or f"tg_{tg_id}"
+            login_l = login_seed[:58]
+            for i in range(40):
+                cand = login_l if i == 0 else f"{login_l[:52]}_{i}"
+                c.execute("SELECT 1 FROM users WHERE login = %s", [cand])
+                if not c.fetchone():
+                    login_l = cand
+                    break
+            password_hash = bcrypt.hashpw(secrets.token_urlsafe(18).encode("utf-8"), bcrypt.gensalt(10)).decode("ascii")
+            c.execute(
+                """
+                INSERT INTO users (login, display_name, password_hash, role, active, telegram_user_id, auth_provider, avatar_url)
+                VALUES (%s, %s, %s, %s, %s, %s, 'telegram', %s)
+                RETURNING id
+                """,
+                [login_l, display_name, password_hash, role, bool(role == "super_admin"), tg_id, photo_url or None],
+            )
+            user_id = int(c.fetchone()[0])
+            if role != "super_admin":
+                _telegram_notify_super_admin_access_request(
+                    tg_id=tg_id, display_name=display_name, username=username
+                )
+                return JsonResponse(
+                    {"error": "So'rov yuborildi. SuperAdminga murojaat qiling."}, status=403
+                )
+
+    final_avatar = ""
+    with connection.cursor() as c2:
+        _ensure_users_auth_schema(c2)
+        c2.execute("SELECT COALESCE(avatar_url, '') FROM users WHERE id = %s LIMIT 1", [user_id])
+        r2 = c2.fetchone()
+        if r2:
+            final_avatar = str(r2[0] or "")
+
+    token = _auth_token_issue(
+        {
+            "uid": user_id,
+            "telegram_user_id": tg_id,
+            "role": role,
+            "display_name": display_name,
+        }
+    )
+    return JsonResponse(
+        {
+            "token": token,
+            "user": {
+                "id": user_id,
+                "telegram_user_id": tg_id,
+                "display_name": display_name,
+                "role": role,
+                "avatar_url": final_avatar,
+            },
+        }
+    )
 
 def _money_int_text(val: Any) -> str:
     """Narx / to‘lov — JSON va taxta uchun butun `som` matn (76000.0 → 76000, 760000 emas)."""
@@ -359,11 +1366,16 @@ def board(request):
 @csrf_exempt
 @require_http_methods(["GET", "HEAD", "POST"])
 def users(request):
+    _auth, auth_err = _require_super_admin(request)
+    if auth_err:
+        return auth_err
     if request.method in ("GET", "HEAD"):
         with connection.cursor() as c:
+            _ensure_users_auth_schema(c)
             c.execute(
                 """
-                SELECT id, login, display_name, role, active, created_at
+                SELECT id, login, display_name, role, active, created_at,
+                       COALESCE(auth_provider, 'password'), telegram_user_id, avatar_url
                 FROM users
                 ORDER BY active DESC, login ASC
                 """
@@ -376,6 +1388,9 @@ def users(request):
                     "role": r[3],
                     "active": bool(r[4]),
                     "created_at": r[5] or "",
+                    "auth_provider": str(r[6] or "password"),
+                    "telegram_user_id": int(r[7]) if r[7] is not None else None,
+                    "avatar_url": str(r[8] or ""),
                 }
                 for r in c.fetchall()
             ]
@@ -400,6 +1415,7 @@ def users(request):
     login_l = login.lower()
     try:
         with connection.cursor() as c:
+            _ensure_users_auth_schema(c)
             c.execute(
                 "INSERT INTO users (login, display_name, password_hash, role) VALUES (%s, %s, %s, %s) RETURNING id",
                 [login_l, display_name, pw_hash, role],
@@ -411,11 +1427,20 @@ def users(request):
 
 
 def _users_patch(request, user_id: int):
+    _auth, auth_err = _require_super_admin(request)
+    if auth_err:
+        return auth_err
     body = _read_json(request)
     if body is None:
         return _json_error("Invalid JSON")
     sets: list[str] = []
     vals: list[Any] = []
+    if "login" in body:
+        lg = (body.get("login") or "").strip().lower()
+        if len(lg) < 2 or len(lg) > 64 or not LOGIN_RE.match(lg):
+            return _json_error("Invalid login", 400)
+        sets.append("login = %s")
+        vals.append(lg)
     if "display_name" in body:
         dn = (body.get("display_name") or "").strip()
         if not dn or len(dn) > 120:
@@ -430,26 +1455,37 @@ def _users_patch(request, user_id: int):
         vals.append(bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt(10)).decode("ascii"))
     if "role" in body:
         role = body.get("role")
-        if role not in ("admin", "staff"):
+        if role not in ("super_admin", "admin", "staff"):
             return _json_error("Invalid role", 400)
         sets.append("role = %s")
         vals.append(role)
     if "active" in body:
         sets.append("active = %s")
-        vals.append(1 if body.get("active") else 0)
+        vals.append(bool(body.get("active")))
+    if "avatar_url" in body:
+        av_raw = body.get("avatar_url")
+        av = "" if av_raw is None else str(av_raw)
+        if av and len(av) > 1_500_000:
+            return _json_error("Rasm hajmi juda katta", 413)
+        sets.append("avatar_url = %s")
+        vals.append(av or None)
     if not sets:
         return JsonResponse({"ok": True, "updated": False})
     vals.append(user_id)
-    with connection.cursor() as c:
-        c.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", vals)
-        if c.rowcount == 0:
-            return _json_error("Foydalanuvchi topilmadi", 404)
+    try:
+        with connection.cursor() as c:
+            c.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", vals)
+            if c.rowcount == 0:
+                return _json_error("Foydalanuvchi topilmadi", 404)
+    except IntegrityError:
+        return _json_error("Bu login allaqachon mavjud", 409)
     return JsonResponse({"ok": True, "updated": True})
 
 
 def _users_delete(_request, user_id: int):
     with connection.cursor() as c:
-        c.execute("UPDATE users SET active = 0 WHERE id = %s AND active = 1", [user_id])
+        _ensure_users_auth_schema(c)
+        c.execute("UPDATE users SET active = FALSE WHERE id = %s AND active = TRUE", [user_id])
         if c.rowcount == 0:
             return _json_error("Faol foydalanuvchi topilmadi", 404)
     return JsonResponse({"ok": True})
@@ -458,9 +1494,187 @@ def _users_delete(_request, user_id: int):
 @csrf_exempt
 @require_http_methods(["PATCH", "DELETE"])
 def user_detail(request, user_id: int):
+    _auth, auth_err = _require_super_admin(request)
+    if auth_err:
+        return auth_err
     if request.method == "PATCH":
         return _users_patch(request, user_id)
     return _users_delete(request, user_id)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def auth_telegram(request):
+    body = _read_json(request)
+    if body is None:
+        return _json_error("Invalid JSON")
+    init_data = str(body.get("initData") or "").strip()
+    if not init_data:
+        return _json_error("initData majburiy", 400)
+    bot_token = str(os.environ.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
+    if not bot_token:
+        return _json_error("Serverda TELEGRAM_BOT_TOKEN topilmadi", 500)
+    tg_user = _telegram_validate_init_data(init_data, bot_token)
+    if tg_user is None:
+        return _json_error("Telegram initData yaroqsiz", 401)
+
+    tg_id = int(tg_user.get("id"))
+    first_name = str(tg_user.get("first_name") or "").strip()
+    last_name = str(tg_user.get("last_name") or "").strip()
+    username = str(tg_user.get("username") or "").strip().lower()
+    photo_url = str(tg_user.get("photo_url") or "").strip()
+    display_name = " ".join([x for x in [first_name, last_name] if x]).strip() or (username or f"tg-{tg_id}")
+    role = "super_admin" if tg_id in _super_admin_tg_ids() else "staff"
+    return _auth_telegram_upsert_and_issue(
+        tg_id=tg_id, display_name=display_name, username=username, preferred_role=role, photo_url=photo_url
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def auth_telegram_login(request):
+    body = _read_json(request)
+    if body is None or not isinstance(body, dict):
+        return _json_error("Invalid payload", 400)
+    bot_token = str(os.environ.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
+    if not bot_token:
+        return _json_error("Serverda TELEGRAM_BOT_TOKEN topilmadi", 500)
+    tg_user = _telegram_validate_login_widget_payload(body, bot_token)
+    if tg_user is None:
+        return _json_error("Telegram login maʼlumotlari yaroqsiz", 401)
+    tg_id = int(tg_user.get("id") or 0)
+    first_name = str(tg_user.get("first_name") or "").strip()
+    last_name = str(tg_user.get("last_name") or "").strip()
+    username = str(tg_user.get("username") or "").strip().lower()
+    photo_url = str(tg_user.get("photo_url") or "").strip()
+    display_name = " ".join([x for x in [first_name, last_name] if x]).strip() or (username or f"tg-{tg_id}")
+    role = "super_admin" if tg_id in _super_admin_tg_ids() else "staff"
+    return _auth_telegram_upsert_and_issue(
+        tg_id=tg_id, display_name=display_name, username=username, preferred_role=role, photo_url=photo_url
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def auth_password_login(request):
+    body = _read_json(request)
+    if body is None:
+        return _json_error("Invalid JSON")
+    login_l = str(body.get("login") or "").strip().lower()
+    password = str(body.get("password") or "")
+    if len(login_l) < 2 or len(login_l) > 64:
+        return _json_error("Login noto'g'ri", 400)
+    if len(password) < 1 or len(password) > 128:
+        return _json_error("Parol noto'g'ri", 400)
+
+    with connection.cursor() as c:
+        _ensure_users_auth_schema(c)
+        c.execute(
+            """
+            SELECT id, display_name, role, active, password_hash, COALESCE(telegram_user_id, 0)
+            FROM users
+            WHERE lower(login) = %s
+            LIMIT 1
+            """,
+            [login_l],
+        )
+        row = c.fetchone()
+    if not row:
+        return _json_error("Login yoki parol xato", 401)
+
+    user_id = int(row[0])
+    display_name = str(row[1] or login_l)
+    role = str(row[2] or "staff")
+    active = bool(row[3])
+    pw_hash = str(row[4] or "")
+    tg_id = int(row[5] or 0)
+
+    if not active:
+        return _json_error("Foydalanuvchi nofaol", 403)
+    try:
+        ok = bcrypt.checkpw(password.encode("utf-8"), pw_hash.encode("ascii"))
+    except Exception:
+        ok = False
+    if not ok:
+        return _json_error("Login yoki parol xato", 401)
+
+    token = _auth_token_issue(
+        {"uid": user_id, "telegram_user_id": tg_id, "role": role, "display_name": display_name}
+    )
+    return JsonResponse(
+        {
+            "token": token,
+            "user": {
+                "id": user_id,
+                "telegram_user_id": tg_id,
+                "display_name": display_name,
+                "role": role,
+            },
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+def auth_me(request):
+    auth, auth_err = _require_auth(request)
+    if auth_err:
+        return auth_err
+    user_id = int(auth.get("uid") or 0)
+    if user_id <= 0:
+        return _json_error("Unauthorized", 401)
+
+    if request.method == "PATCH":
+        body = _read_json(request)
+        if body is None:
+            return _json_error("Invalid JSON")
+        sets: list[str] = []
+        vals: list[Any] = []
+        if "avatar_url" in body:
+            av_raw = body.get("avatar_url")
+            av = "" if av_raw is None else str(av_raw)
+            if av and len(av) > 1_500_000:
+                return _json_error("Rasm hajmi juda katta", 413)
+            sets.append("avatar_url = %s")
+            vals.append(av or None)
+        if "display_name" in body:
+            dn = (body.get("display_name") or "").strip()
+            if not dn or len(dn) > 120:
+                return _json_error("Invalid display_name", 400)
+            sets.append("display_name = %s")
+            vals.append(dn)
+        if sets:
+            vals.append(user_id)
+            with connection.cursor() as c:
+                _ensure_users_auth_schema(c)
+                c.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", vals)
+
+    with connection.cursor() as c:
+        _ensure_users_auth_schema(c)
+        c.execute(
+            """
+            SELECT id, display_name, role, COALESCE(telegram_user_id, 0), avatar_url
+            FROM users
+            WHERE id = %s
+            LIMIT 1
+            """,
+            [user_id],
+        )
+        row = c.fetchone()
+    if not row:
+        return _json_error("Foydalanuvchi topilmadi", 404)
+
+    return JsonResponse(
+        {
+            "user": {
+                "id": int(row[0]),
+                "display_name": str(row[1] or ""),
+                "role": str(row[2] or "staff"),
+                "telegram_user_id": int(row[3] or 0),
+                "avatar_url": str(row[4] or ""),
+            }
+        }
+    )
 
 
 @csrf_exempt
@@ -473,7 +1687,13 @@ def bookings_create(request):
     room_code = body.get("roomCode") or ""
     check_in_date = body.get("checkInDate") or ""
     nights = body.get("nights")
-    checked_in_by = body.get("checkedInBy") or ""
+    checked_in_body = str(body.get("checkedInBy") or "").strip()
+    auth_req = _request_auth(request)
+    if auth_req:
+        dn = str(auth_req.get("display_name") or "").strip()
+        checked_in_by = (dn[:120] if dn else checked_in_body[:120])
+    else:
+        checked_in_by = checked_in_body[:120]
     lines = body.get("lines")
     if not hostel or not room_code or not ISO_DATE.match(check_in_date):
         return _json_error("Filial, xona yoki kirish sanasi noto‘g‘ri yoki yetishmayapti.", 400)
@@ -626,6 +1846,19 @@ def bookings_create(request):
                         ],
                     )
                     inserted.append(c.fetchone()[0])
+    try:
+        _notify_booking_channel_after_create(
+            hostel=hostel,
+            room_code=room_code,
+            check_in_date=check_in_date,
+            nights=nights,
+            checked_in_by=checked_in_by,
+            lines=lines,
+            inserted_ids=inserted,
+            resolved_lines=resolved_lines,
+        )
+    except Exception:
+        logger.exception("Telegram kanal bildirishnomasi (create) ishlamadi")
     return JsonResponse(
         {"ids": inserted, "identityOverlapWarnings": identity_overlap_warnings},
         status=201,
@@ -637,12 +1870,17 @@ def _bookings_patch(request, booking_id: uuid.UUID):
     if body is None:
         return _json_error("Maʼlumot formati buzilgan (JSON).")
     bid = str(booking_id)
+    before_snap: dict[str, Any] = {}
+    tg_reply_mid = 0
     with connection.cursor() as c:
         ensure_guest_schema(c)
+        _ensure_bed_bookings_telegram_channel_message_id_column(c)
         c.execute(
             """
             SELECT b.room_id, b.bed_index, b.check_in_date, b.nights, b.guest_name, b.guest_phone,
-                   b.guest_id, h.name, COALESCE(b.booking_kind, 'check_in')
+                   b.guest_id, h.name, COALESCE(b.booking_kind, 'check_in'),
+                   b.price, b.paid, b.notes, b.photos, b.checked_in_by,
+                   COALESCE(b.telegram_channel_message_id, 0)
             FROM bed_bookings b
             JOIN rooms r ON r.id = b.room_id
             JOIN hostels h ON h.id = r.hostel_id
@@ -663,6 +1901,12 @@ def _bookings_patch(request, booking_id: uuid.UUID):
             cur_guest_id,
             hostel_name,
             cur_booking_kind_raw,
+            cur_price,
+            cur_paid,
+            cur_notes,
+            cur_photos,
+            cur_checked_in_by,
+            cur_telegram_mid,
         ) = (
             int(cur[0]),
             int(cur[1]),
@@ -673,8 +1917,27 @@ def _bookings_patch(request, booking_id: uuid.UUID):
             cur[6],
             str(cur[7] or ""),
             str(cur[8] or "check_in"),
+            cur[9],
+            cur[10],
+            cur[11],
+            cur[12],
+            str(cur[13] or ""),
+            int(cur[14] or 0),
         )
         cur_booking_kind = "bron" if str(cur_booking_kind_raw or "").strip().lower() == "bron" else "check_in"
+        before_snap = _booking_telegram_snapshot_row(
+            check_in_date,
+            cur_nights,
+            cur_guest_name,
+            cur_guest_phone,
+            cur_price,
+            cur_paid,
+            cur_notes,
+            cur_photos,
+            cur_checked_in_by,
+            cur_booking_kind_raw,
+        )
+        tg_reply_mid = int(cur_telegram_mid or 0)
 
     want_checkin = str(body.get("bookingKind") or body.get("booking_kind") or "").strip().lower() == "check_in"
     if want_checkin and cur_booking_kind == "bron" and "guestPassportSeries" not in body:
@@ -787,6 +2050,7 @@ def _bookings_patch(request, booking_id: uuid.UUID):
         return JsonResponse(out)
     sets.append("updated_at = CURRENT_TIMESTAMP")
     vals.append(bid)
+    after_snap: dict[str, Any] | None = None
     with connection.cursor() as c:
         c.execute(f"UPDATE bed_bookings SET {', '.join(sets)} WHERE id = %s", vals)
         if "photos" in body and isinstance(body.get("photos"), list):
@@ -809,9 +2073,34 @@ def _bookings_patch(request, booking_id: uuid.UUID):
                     """,
                     [str(body["guestName"])[:200], int(gr[0])],
                 )
+        c.execute(
+            """
+            SELECT check_in_date, nights, guest_name, guest_phone, price, paid, notes, photos, checked_in_by,
+                   COALESCE(booking_kind, 'check_in')
+            FROM bed_bookings
+            WHERE id = %s
+            """,
+            [bid],
+        )
+        row_after = c.fetchone()
+        if row_after:
+            after_snap = _booking_telegram_snapshot_row(*row_after)
     resp: dict[str, Any] = {"ok": True, "updated": True}
     if patch_identity_warning is not None:
         resp["identityOverlapWarning"] = patch_identity_warning
+    if after_snap is not None and before_snap and tg_reply_mid > 0:
+        auth_req = _request_auth(request)
+        who_html = ""
+        if auth_req:
+            wn = str(auth_req.get("display_name") or "").strip()
+            if wn:
+                who_html = f"👨‍💼 Kim: {_tg_html(wn)}"
+        try:
+            reply_html = _booking_channel_patch_reply_html(before_snap, after_snap, bid, who_html)
+            if reply_html:
+                _telegram_send_channel_html_reply(tg_reply_mid, reply_html)
+        except Exception:
+            logger.exception("Telegram kanal patch reply")
     return JsonResponse(resp)
 
 
@@ -823,17 +2112,38 @@ def _bookings_delete(request, booking_id: uuid.UUID):
         reason_label = str(raw.get("cancelReason", "")).strip()[:500]
     if not reason_label:
         return _json_error("cancelReason majburiy (bekor sababi)", 400)
+    cancel_meta: dict[str, Any] | None = None
     with transaction.atomic():
         with connection.cursor() as c:
             c.execute(
-                "SELECT COALESCE(booking_kind, 'check_in') FROM bed_bookings WHERE id = %s AND status = 'active'",
+                """
+                SELECT h.name, r.code, COALESCE(r.name, r.code, ''),
+                       b.bed_index, COALESCE(b.guest_name, ''), COALESCE(b.booking_kind, 'check_in')
+                FROM bed_bookings b
+                JOIN rooms r ON r.id = b.room_id
+                JOIN hostels h ON h.id = r.hostel_id
+                WHERE b.id = %s AND b.status = 'active'
+                """,
                 [bid],
             )
             row = c.fetchone()
             if not row:
                 return _json_error("Faol yozuv topilmadi.", 404)
-            booking_kind = str(row[0] or "check_in").strip().lower()
+            hostel_name = str(row[0] or "")
+            room_code = str(row[1] or "")
+            room_name = str(row[2] or "")
+            bed_index = int(row[3] or 0)
+            guest_name = str(row[4] or "")
+            booking_kind = str(row[5] or "check_in").strip().lower()
             is_bron = booking_kind == "bron"
+            cancel_meta = {
+                "hostel": hostel_name,
+                "room_code": room_code,
+                "room_name": room_name,
+                "bed_index": bed_index,
+                "guest_name": guest_name,
+                "booking_kind": booking_kind,
+            }
             c.execute(
                 """
                 UPDATE bed_bookings
@@ -847,6 +2157,20 @@ def _bookings_delete(request, booking_id: uuid.UUID):
             )
             if c.rowcount == 0:
                 return _json_error("Faol yozuv topilmadi.", 404)
+    if cancel_meta:
+        try:
+            _notify_booking_channel_cancelled(
+                hostel=cancel_meta["hostel"],
+                room_code=cancel_meta["room_code"],
+                room_name=cancel_meta["room_name"],
+                bed_index=int(cancel_meta["bed_index"]),
+                guest_name=cancel_meta["guest_name"],
+                booking_kind=str(cancel_meta["booking_kind"]),
+                reason=reason_label,
+                booking_id=bid,
+            )
+        except Exception:
+            logger.exception("Telegram kanal bildirishnomasi (cancel) ishlamadi")
     return JsonResponse({"ok": True})
 
 
@@ -1156,8 +2480,8 @@ def cleaning_patch(request, room_code: str):
         vals.append(json.dumps(body["photosAfter"][:20]))
     if "fullTaken" in body:
         sets.append("full_taken = %s")
-        vals.append(bool(body.get("fullTaken")))
-        if not bool(body.get("fullTaken")) and "fullTakenMode" not in body:
+        vals.append(1 if bool(body.get("fullTaken")) else 0)
+        if not bool(body.get("fullTaken")):
             sets.append("full_taken_mode = %s")
             vals.append("")
     if "fullTakenMode" in body:

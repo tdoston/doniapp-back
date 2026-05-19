@@ -91,6 +91,7 @@ class BedBooking(models.Model):
     notes = models.TextField(blank=True, default="")
     photos = models.TextField(default="[]")
     checked_in_by = models.CharField(max_length=200, blank=True, default="")
+    telegram_channel_message_id = models.BigIntegerField(null=True, blank=True)
     status = models.CharField(max_length=20, default="active")
     booking_kind = models.CharField(max_length=20, default="check_in")
     expected_arrival = models.CharField(max_length=120, blank=True, default="")

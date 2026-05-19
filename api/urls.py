@@ -4,6 +4,10 @@ from . import views
 from .catalog_views import CancelReasonListView, HostelListView, RoomCatalogListView
 
 urlpatterns = [
+    path("auth/telegram", views.auth_telegram),
+    path("auth/telegram-login", views.auth_telegram_login),
+    path("auth/password-login", views.auth_password_login),
+    path("auth/me", views.auth_me),
     path("catalog/hostels", HostelListView.as_view()),
     path("catalog/rooms", RoomCatalogListView.as_view()),
     path("catalog/cancel-reasons", CancelReasonListView.as_view()),
