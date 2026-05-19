@@ -1,8 +1,0 @@
-# Railway: root directory = `django_backend` (monorepo swift-bookings)
-[build]
-builder = "NIXPACKS"
-nixpacksConfigPath = "nixpacks.toml"
-
-[deploy]
-# Railpack: `.venv` ichidagi Python; migrate/seed build bosqichida (nixpacks.toml)
-startCommand = "bash -lc 'set -e; .venv/bin/python manage.py migrate --noinput && exec .venv/bin/python -m gunicorn swiftbookings.wsgi:application --bind 0.0.0.0:${PORT:-8080} --workers 2 --threads 4 --timeout 120'"
