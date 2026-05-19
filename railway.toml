@@ -1,0 +1,10 @@
+# Railway Config-as-Code — `doniapp-back` root = `django_backend`
+# Build: DATABASE_URL kerak (Postgres plugin). Start: faqat migrate + gunicorn.
+
+[build]
+builder = "NIXPACKS"
+nixpacksConfigPath = "nixpacks.toml"
+buildCommand = "chmod +x scripts/railway_build.sh scripts/railway_start.sh && bash scripts/railway_build.sh"
+
+[deploy]
+startCommand = "bash scripts/railway_start.sh"
