@@ -15,9 +15,14 @@ class Command(BaseCommand):
         url = resolve_database_url()
         if not url:
             self.stderr.write(self.style.ERROR("DATABASE_URL topilmadi"))
-            return
+            raise SystemExit(1)
         self.stdout.write(f"target: {masked_db_target(url)}")
-        with connection.cursor() as c:
-            c.execute("SELECT version()")
-            ver = c.fetchone()[0]
+        try:
+            with connection.cursor() as c:
+                c.execute("SELECT 1")
+                c.execute("SELECT version()")
+                ver = c.fetchone()[0]
+        except Exception as exc:
+            self.stderr.write(self.style.ERROR(f"FAIL — {exc}"))
+            raise SystemExit(1) from exc
         self.stdout.write(self.style.SUCCESS(f"OK — {ver[:80]}"))

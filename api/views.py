@@ -1197,13 +1197,13 @@ def health(_request):
         db_ok = True
     except Exception as exc:
         db_error = str(exc)[:200]
-    payload = {"ok": db_ok, "service": "swift-bookings-api", "db": db_ok}
+    payload = {"ok": True, "service": "swift-bookings-api", "db": db_ok, "ready": db_ok}
     if db_error and not settings.DEBUG:
         payload["db_error"] = "connection_failed"
     elif db_error:
         payload["db_error"] = db_error
-    status = 200 if db_ok else 503
-    return JsonResponse(payload, status=status)
+    # Railway healthcheck: HTTP 200 (app ishlayapti); `db`/`ready` — Postgres holati
+    return JsonResponse(payload, status=200)
 
 
 @csrf_exempt
