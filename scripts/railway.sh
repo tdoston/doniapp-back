@@ -73,6 +73,8 @@ case "$CMD" in
       "$PY" manage.py bootstrap_postgres_schema
       echo "[railway] migrate"
       "$PY" manage.py migrate --noinput
+      echo "[railway] seed_initial_db"
+      "$PY" manage.py seed_initial_db
     else
       echo "[railway] XATO: DATABASE_URL yo'q — Postgres → doniapp-back Connect"
       exit 1
