@@ -34,6 +34,16 @@ case "$CMD" in
     ;;
   start)
     PORT="${PORT:-8080}"
+    if [ -n "${DATABASE_URL:-}" ]; then
+      echo "[railway] bootstrap_postgres_schema"
+      "$PY" manage.py bootstrap_postgres_schema
+      echo "[railway] migrate"
+      "$PY" manage.py migrate --noinput
+      echo "[railway] seed_initial_db"
+      "$PY" manage.py seed_initial_db
+    else
+      echo "[railway] warn: DATABASE_URL missing"
+    fi
     if [ ! -d staticfiles ] || [ -z "$(ls -A staticfiles 2>/dev/null || true)" ]; then
       echo "[railway] collectstatic (fallback)"
       "$PY" manage.py collectstatic --noinput
