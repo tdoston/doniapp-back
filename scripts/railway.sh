@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Railway: build | start (gunicorn darhol, DB fon jarayonida)
+# Prod start = lokal `db:reset` oqimi (dropdb siz): bootstrap → migrate → seed → gunicorn
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -23,60 +23,56 @@ _has_db_url() {
 }
 
 _log_db_target() {
-  if _has_db_url; then
-    "$PY" -c "
+  "$PY" -c "
 from swiftbookings.db_railway import masked_db_target, resolve_database_url
-print('[railway] DB', masked_db_target(resolve_database_url()), flush=True)
+u = resolve_database_url()
+print('[railway] DB', masked_db_target(u) if u else 'MISSING', flush=True)
 "
-  else
-    echo "[railway] DB MISSING — Postgres → doniapp-back Connect"
-  fi
 }
 
-_db_setup_sync() {
-  _log_db_target
-  local n="${RAILWAY_DB_WAIT_ATTEMPTS:-18}"
+_await_db() {
+  local n="${RAILWAY_DB_WAIT_ATTEMPTS:-12}"
   local i=1
   while [ "$i" -le "$n" ]; do
     if "$PY" manage.py check_db 2>/dev/null; then
-      break
+      return 0
     fi
-    echo "[railway-bg] DB kutilyapti ($i/$n)..." >&2
-    if [ "$i" -eq "$n" ]; then
-      echo "[railway-bg] XATO: Postgres javob bermadi" >&2
-      return 1
-    fi
-    sleep 10
+    echo "[railway] Postgres kutilyapti ($i/$n)..."
+    sleep 5
     i=$((i + 1))
   done
-  "$PY" manage.py bootstrap_postgres_schema
-  "$PY" manage.py migrate --noinput
-  "$PY" manage.py seed_initial_db
-  echo "[railway-bg] DB setup tayyor" >&2
+  echo "[railway] XATO: Postgres ulanmadi — Railway Postgres Restart + Redeploy"
+  return 1
 }
 
-_start_db_background() {
+# Lokal `reset_local_db.sh` bilan bir xil (faqat dropdb yo'q)
+_db_setup_local_flow() {
   if ! _has_db_url; then
-    echo "[railway] ogohlantirish: Postgres URL yo'q"
-    return 0
+    echo "[railway] XATO: DATABASE_URL / POSTGRES_PRIVATE_URL yo'q"
+    exit 1
   fi
-  ( _db_setup_sync ) >> /tmp/railway-db.log 2>&1 &
-  echo "[railway] DB setup background → /tmp/railway-db.log"
+  _log_db_target
+  _await_db
+  echo "[railway] bootstrap_postgres_schema"
+  "$PY" manage.py bootstrap_postgres_schema
+  echo "[railway] migrate"
+  "$PY" manage.py migrate --noinput
+  echo "[railway] seed_initial_db"
+  "$PY" manage.py seed_initial_db
 }
 
 case "$CMD" in
   build)
-    echo "[railway] collectstatic (PY=$PY)"
+    echo "[railway] collectstatic"
     "$PY" manage.py collectstatic --noinput
     ;;
   start)
+    _db_setup_local_flow
     if [ ! -d staticfiles ] || [ -z "$(ls -A staticfiles 2>/dev/null || true)" ]; then
-      echo "[railway] collectstatic (start fallback)"
-      "$PY" manage.py collectstatic --noinput || true
+      "$PY" manage.py collectstatic --noinput
     fi
-    _start_db_background
     PORT="${PORT:-8080}"
-    echo "[railway] gunicorn 0.0.0.0:${PORT} (PY=$PY)"
+    echo "[railway] gunicorn 0.0.0.0:${PORT}"
     exec "$PY" -m gunicorn swiftbookings.wsgi:application \
       --bind "0.0.0.0:${PORT}" \
       --workers 1 \
