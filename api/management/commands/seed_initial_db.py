@@ -5,6 +5,8 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
+from api.pg_bootstrap import postgres_business_schema_ready
+
 # (hostel_name, room_code, display_name, bed_count, inactive) — katalog API bilan mos
 ROOM_SEED: list[tuple[str, str, str, int, bool]] = [
     ("Vodnik", "v1", "1-qavat Zal", 4, False),
@@ -34,6 +36,23 @@ class Command(BaseCommand):
     help = "Hostels + rooms jadvalini static frontend bilan mos qilib to'ldiradi (takrorlash xavfsiz)."
 
     def handle(self, *args, **options):
+        if not postgres_business_schema_ready(connection):
+            self.stdout.write(self.style.WARNING("seed_initial_db: sxema tayyor emas — avval bootstrap."))
+            return
+
+        with connection.cursor() as c:
+            c.execute("SELECT COUNT(*) FROM hostels")
+            hostel_n = int(c.fetchone()[0])
+            c.execute("SELECT COUNT(*) FROM rooms")
+            room_n = int(c.fetchone()[0])
+        if hostel_n >= len(HOSTELS) and room_n >= len(ROOM_SEED):
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"seed_initial_db: skip (hostels={hostel_n}, rooms={room_n} allaqachon to'ldirilgan)."
+                )
+            )
+            return
+
         with transaction.atomic():
             with connection.cursor() as c:
                 for name in HOSTELS:

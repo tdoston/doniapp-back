@@ -37,6 +37,8 @@ def _database_from_url(url: str) -> dict:
         options: dict[str, str] = {}
         if sslmode:
             options["sslmode"] = sslmode
+        opts = dict(options)
+        opts.setdefault("connect_timeout", int(os.environ.get("POSTGRES_CONNECT_TIMEOUT", "10")))
         return {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": path or "swift_bookings",
@@ -44,8 +46,8 @@ def _database_from_url(url: str) -> dict:
             "PASSWORD": p.password or "postgres",
             "HOST": p.hostname or "127.0.0.1",
             "PORT": str(p.port or 5432),
-            "CONN_MAX_AGE": 60,
-            **({"OPTIONS": options} if options else {}),
+            "CONN_MAX_AGE": 0 if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() else 60,
+            "OPTIONS": opts,
         }
     return {}
 

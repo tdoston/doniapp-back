@@ -7,6 +7,22 @@ from pathlib import Path
 from django.conf import settings
 
 
+def postgres_business_schema_ready(connection) -> bool:
+    """`hostels` jadvali bor — bootstrap qayta ishga shart emas."""
+    if connection.vendor != "postgresql":
+        return True
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT EXISTS (
+              SELECT 1 FROM information_schema.tables
+              WHERE table_schema = 'public' AND table_name = 'hostels'
+            )
+            """
+        )
+        return bool(cursor.fetchone()[0])
+
+
 def apply_postgres_bootstrap_sql(connection) -> None:
     """Bo'sh DB uchun biznes DDL; IF NOT EXISTS — takrorlash xavfsiz. Faqat PostgreSQL."""
     if connection.vendor != "postgresql":

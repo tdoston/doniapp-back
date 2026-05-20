@@ -6,4 +6,5 @@ buildCommand = "chmod +x scripts/railway.sh && ./scripts/railway.sh build"
 [deploy]
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300
+releaseCommand = "./scripts/railway.sh release"
 startCommand = "./scripts/railway.sh start"

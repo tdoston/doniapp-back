@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Railway: build (collectstatic) | release (DB) | start (gunicorn)
+# Railway: build | release (og'ir DB, deployda 1 marta) | start (migrate + gunicorn)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -15,39 +15,37 @@ fi
 export DJANGO_DEBUG="${DJANGO_DEBUG:-0}"
 CMD="${1:-}"
 
+_db_setup() {
+  if [ -z "${DATABASE_URL:-}" ]; then
+    echo "[railway] warn: DATABASE_URL yo'q"
+    return 0
+  fi
+  echo "[railway] bootstrap_postgres_schema"
+  "$PY" manage.py bootstrap_postgres_schema
+  echo "[railway] migrate"
+  "$PY" manage.py migrate --noinput
+  echo "[railway] seed_initial_db"
+  "$PY" manage.py seed_initial_db
+}
+
 case "$CMD" in
   build)
     echo "[railway] collectstatic"
     "$PY" manage.py collectstatic --noinput
     ;;
   release)
-    if [ -z "${DATABASE_URL:-}" ]; then
-      echo "[railway] DATABASE_URL required (Postgres plugin)"
-      exit 1
-    fi
-    echo "[railway] bootstrap_postgres_schema"
-    "$PY" manage.py bootstrap_postgres_schema
-    echo "[railway] migrate"
-    "$PY" manage.py migrate --noinput
-    echo "[railway] seed_initial_db"
-    "$PY" manage.py seed_initial_db
+    _db_setup
     ;;
   start)
-    PORT="${PORT:-8080}"
     if [ -n "${DATABASE_URL:-}" ]; then
-      echo "[railway] bootstrap_postgres_schema"
-      "$PY" manage.py bootstrap_postgres_schema
-      echo "[railway] migrate"
+      echo "[railway] migrate (start — bootstrap/seed faqat release)"
       "$PY" manage.py migrate --noinput
-      echo "[railway] seed_initial_db"
-      "$PY" manage.py seed_initial_db
-    else
-      echo "[railway] warn: DATABASE_URL missing"
     fi
     if [ ! -d staticfiles ] || [ -z "$(ls -A staticfiles 2>/dev/null || true)" ]; then
       echo "[railway] collectstatic (fallback)"
       "$PY" manage.py collectstatic --noinput
     fi
+    PORT="${PORT:-8080}"
     echo "[railway] gunicorn :${PORT}"
     exec "$PY" -m gunicorn swiftbookings.wsgi:application \
       --bind "0.0.0.0:${PORT}" \
