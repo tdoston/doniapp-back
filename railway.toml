@@ -1,8 +1,7 @@
-# doniapp-back — Railpack. Build: collectstatic. Release: DB. Start: gunicorn (tez).
+# doniapp-back — Railpack. Build: collectstatic. Start: gunicorn + fon DB.
 
 [build]
 buildCommand = "chmod +x scripts/railway_*.sh && bash scripts/railway_build.sh"
 
 [deploy]
-releaseCommand = "bash scripts/railway_release.sh"
 startCommand = "bash scripts/railway_start.sh"

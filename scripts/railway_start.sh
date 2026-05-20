@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Railway start: tez gunicorn (healthcheck). DB — railway_release.sh da.
+# Railway start: avval gunicorn (healthcheck), DB fon jarayonida.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -15,8 +15,21 @@ fi
 export DJANGO_DEBUG="${DJANGO_DEBUG:-0}"
 PORT="${PORT:-8080}"
 
+if [ -n "${DATABASE_URL:-}" ]; then
+  (
+    echo "[railway-bg] bootstrap..."
+    "$PY" manage.py bootstrap_postgres_schema
+    echo "[railway-bg] migrate..."
+    "$PY" manage.py migrate --noinput
+    echo "[railway-bg] seed..."
+    "$PY" manage.py seed_initial_db
+    echo "[railway-bg] done."
+  ) >> /tmp/railway-db-setup.log 2>&1 &
+else
+  echo "[railway-start] ogohlantirish: DATABASE_URL yo'q, DB setup o'tkazildi."
+fi
+
 if [ ! -d staticfiles ] || [ -z "$(ls -A staticfiles 2>/dev/null || true)" ]; then
-  echo "[railway-start] collectstatic..."
   "$PY" manage.py collectstatic --noinput
 fi
 
