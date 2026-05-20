@@ -1,6 +1,5 @@
-# Railpack asosiy builder; faqat start fallback (deps + build — railway.toml).
 [variables]
 PYTHONUNBUFFERED = "1"
 
 [start]
-cmd = "bash scripts/railway_start.sh"
+cmd = "./scripts/railway.sh start"

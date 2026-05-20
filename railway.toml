@@ -1,7 +1,10 @@
-# doniapp-back — Railpack. Build: collectstatic. Start: gunicorn + fon DB.
+# doniapp-back — Root Directory: django_backend
 
 [build]
-buildCommand = "chmod +x scripts/railway_*.sh && bash scripts/railway_build.sh"
+buildCommand = "chmod +x scripts/railway.sh && ./scripts/railway.sh build"
 
 [deploy]
-startCommand = "bash scripts/railway_start.sh"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 120
+releaseCommand = "./scripts/railway.sh release"
+startCommand = "./scripts/railway.sh start"

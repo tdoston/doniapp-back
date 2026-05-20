@@ -143,9 +143,11 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
-# collectstatic buildda ishlamasa ham admin CSS ishlashi uchun (Railway ogohlantirishini bartaraf)
-WHITENOISE_MANIFEST_STRICT = False
+STATICFILES_STORAGE = (
+    "django.contrib.staticfiles.storage.StaticFilesStorage"
+    if DEBUG
+    else "whitenoise.storage.CompressedStaticFilesStorage"
+)
 
 def _normalize_origin(origin: str) -> str:
     """Ensure env-provided origin has scheme for Django 4+ checks."""

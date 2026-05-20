@@ -12,7 +12,8 @@
     "admin:reset": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py ensure_admin --force'",
     "telegram:verify": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py telegram_verify'",
     "telegram:channel-test": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py telegram_channel_test\"",
-    "railway:build": "bash scripts/railway_build.sh",
-    "railway:start": "bash scripts/railway_start.sh"
+    "railway:build": "bash scripts/railway.sh build",
+    "railway:release": "bash scripts/railway.sh release",
+    "railway:start": "bash scripts/railway.sh start"
   }
 }
