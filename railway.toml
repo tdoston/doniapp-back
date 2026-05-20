@@ -1,7 +1,4 @@
-# doniapp-back — repo root = django_backend fayllari
-
-[build]
-buildCommand = "chmod +x scripts/railway.sh && bash scripts/railway.sh build"
+# doniapp-back — Railpack default build; faqat start override
 
 [deploy]
 healthcheckPath = "/api/health"
