@@ -1,9 +1,9 @@
-# doniapp-back — Root Directory: django_backend
+# doniapp-back — repo root = django_backend fayllari
 
 [build]
-buildCommand = "chmod +x scripts/railway.sh && ./scripts/railway.sh build"
+buildCommand = "chmod +x scripts/railway.sh && bash scripts/railway.sh build"
 
 [deploy]
 healthcheckPath = "/api/health"
-healthcheckTimeout = 120
-startCommand = "./scripts/railway.sh start"
+healthcheckTimeout = 60
+startCommand = "chmod +x scripts/railway.sh && bash scripts/railway.sh start"
