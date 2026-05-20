@@ -1,7 +1,5 @@
 import os
 from pathlib import Path
-from urllib.parse import parse_qs, quote_plus, urlparse
-
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,56 +19,13 @@ if _railway_public and _railway_public not in ALLOWED_HOSTS:
 if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() and ".up.railway.app" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(".up.railway.app")
 
-def _database_from_url(url: str) -> dict:
-    if url.startswith("postgresql://") or url.startswith("postgres://"):
-        p = urlparse(url)
-        path = (p.path or "").lstrip("/")
-        q = parse_qs(p.query or "")
-        ssl_vals = q.get("sslmode") or []
-        sslmode = str(ssl_vals[0]).strip() if ssl_vals else ""
-        if not sslmode:
-            sslmode = os.environ.get("POSTGRES_SSLMODE", "").strip()
-        host_l = (p.hostname or "").lower()
-        # Railway TCP proxy — URL da sslmode bo‘lmasa, odatda SSL talab qilinadi
-        if not sslmode and "proxy.rlwy.net" in host_l:
-            sslmode = "require"
-        options: dict[str, str] = {}
-        if sslmode:
-            options["sslmode"] = sslmode
-        opts = dict(options)
-        opts.setdefault("connect_timeout", int(os.environ.get("POSTGRES_CONNECT_TIMEOUT", "10")))
-        return {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": path or "swift_bookings",
-            "USER": p.username or "postgres",
-            "PASSWORD": p.password or "postgres",
-            "HOST": p.hostname or "127.0.0.1",
-            "PORT": str(p.port or 5432),
-            "CONN_MAX_AGE": 0 if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() else 60,
-            "OPTIONS": opts,
-        }
-    return {}
+from swiftbookings.db_railway import database_config_from_url, masked_db_target, resolve_database_url
 
-
-# Railway: ichki tarmoqda `DATABASE_URL` (private). Lokal/tashqi: `DATABASE_PUBLIC_URL` yoki
-# `RAILWAY_TCP_PROXY_DOMAIN` + `RAILWAY_TCP_PROXY_PORT` + `POSTGRES_*`.
-_db_url = (
-    os.environ.get("DATABASE_URL", "").strip()
-    or os.environ.get("DATABASE_PUBLIC_URL", "").strip()
-)
-_tcp_host = os.environ.get("RAILWAY_TCP_PROXY_DOMAIN", "").strip()
-_tcp_port = os.environ.get("RAILWAY_TCP_PROXY_PORT", "").strip()
-_pg_user = os.environ.get("POSTGRES_USER", "postgres").strip()
-_pg_pass = os.environ.get("POSTGRES_PASSWORD", "").strip()
-_pg_db = os.environ.get("POSTGRES_DB", "railway").strip()
-if not _db_url and _tcp_host and _pg_pass:
-    port = _tcp_port or "5432"
-    _db_url = (
-        f"postgresql://{quote_plus(_pg_user)}:{quote_plus(_pg_pass)}"
-        f"@{_tcp_host}:{port}/{_pg_db}?sslmode=require"
-    )
+_db_url = resolve_database_url()
 if _db_url.startswith("postgresql://") or _db_url.startswith("postgres://"):
-    DATABASES = {"default": _database_from_url(_db_url)}
+    DATABASES = {"default": database_config_from_url(_db_url)}
+    if os.environ.get("RAILWAY_ENVIRONMENT", "").strip():
+        print(f"[settings] DB → {masked_db_target(_db_url)} env=production", flush=True)
 else:
     DATABASES = {
         "default": {

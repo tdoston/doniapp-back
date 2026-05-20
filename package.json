@@ -14,6 +14,7 @@
     "telegram:channel-test": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py telegram_channel_test\"",
     "railway:build": "bash scripts/railway.sh build",
     "railway:release": "bash scripts/railway.sh release",
-    "railway:start": "bash scripts/railway.sh start"
+    "railway:start": "bash scripts/railway.sh start",
+    "db:check": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py check_db'"
   }
 }

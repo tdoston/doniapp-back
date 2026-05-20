@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Railway: build | release (og'ir DB, deployda 1 marta) | start (migrate + gunicorn)
+# Railway: build | release (to'liq DB) | start (bootstrap skip + migrate + gunicorn)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -15,11 +15,24 @@ fi
 export DJANGO_DEBUG="${DJANGO_DEBUG:-0}"
 CMD="${1:-}"
 
+_log_db_target() {
+  if [ -n "${DATABASE_URL:-}" ]; then
+    "$PY" -c "
+from swiftbookings.db_railway import masked_db_target, resolve_database_url
+u = resolve_database_url()
+print('[railway] DB', masked_db_target(u) if u else 'MISSING')
+" 2>/dev/null || echo "[railway] DB (DATABASE_URL set)"
+  else
+    echo "[railway] DB MISSING — Postgres pluginni backend servisiga ulang"
+  fi
+}
+
 _db_setup() {
   if [ -z "${DATABASE_URL:-}" ]; then
-    echo "[railway] warn: DATABASE_URL yo'q"
-    return 0
+    echo "[railway] XATO: DATABASE_URL yo'q"
+    exit 1
   fi
+  _log_db_target
   echo "[railway] bootstrap_postgres_schema"
   "$PY" manage.py bootstrap_postgres_schema
   echo "[railway] migrate"
@@ -38,8 +51,14 @@ case "$CMD" in
     ;;
   start)
     if [ -n "${DATABASE_URL:-}" ]; then
-      echo "[railway] migrate (start — bootstrap/seed faqat release)"
+      _log_db_target
+      echo "[railway] bootstrap (skip if ready)"
+      "$PY" manage.py bootstrap_postgres_schema
+      echo "[railway] migrate"
       "$PY" manage.py migrate --noinput
+    else
+      echo "[railway] XATO: DATABASE_URL yo'q — Postgres → doniapp-back Connect"
+      exit 1
     fi
     if [ ! -d staticfiles ] || [ -z "$(ls -A staticfiles 2>/dev/null || true)" ]; then
       echo "[railway] collectstatic (fallback)"

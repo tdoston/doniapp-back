@@ -16,6 +16,7 @@ from urllib import parse, request
 from urllib.error import HTTPError, URLError
 
 import bcrypt
+from django.conf import settings
 from django.db import connection, transaction
 from django.db.utils import IntegrityError
 from django.http import JsonResponse
@@ -1188,7 +1189,21 @@ def _find_active_overlap_booking(
 @csrf_exempt
 @require_http_methods(["GET"])
 def health(_request):
-    return JsonResponse({"ok": True, "service": "swift-bookings-api"})
+    db_ok = False
+    db_error = ""
+    try:
+        with connection.cursor() as c:
+            c.execute("SELECT 1")
+        db_ok = True
+    except Exception as exc:
+        db_error = str(exc)[:200]
+    payload = {"ok": db_ok, "service": "swift-bookings-api", "db": db_ok}
+    if db_error and not settings.DEBUG:
+        payload["db_error"] = "connection_failed"
+    elif db_error:
+        payload["db_error"] = db_error
+    status = 200 if db_ok else 503
+    return JsonResponse(payload, status=status)
 
 
 @csrf_exempt
