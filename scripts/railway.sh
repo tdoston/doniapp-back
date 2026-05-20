@@ -15,15 +15,18 @@ fi
 export DJANGO_DEBUG="${DJANGO_DEBUG:-0}"
 CMD="${1:-}"
 
+_has_db_url() {
+  "$PY" -c "from swiftbookings.db_railway import resolve_database_url; import sys; sys.exit(0 if resolve_database_url() else 1)"
+}
+
 _log_db_target() {
-  if [ -n "${DATABASE_URL:-}" ]; then
+  if _has_db_url; then
     "$PY" -c "
 from swiftbookings.db_railway import masked_db_target, resolve_database_url
-u = resolve_database_url()
-print('[railway] DB', masked_db_target(u) if u else 'MISSING')
-" 2>/dev/null || echo "[railway] DB (DATABASE_URL set)"
+print('[railway] DB', masked_db_target(resolve_database_url()))
+"
   else
-    echo "[railway] DB MISSING — Postgres pluginni backend servisiga ulang"
+    echo "[railway] DB MISSING — Postgres → doniapp-back Connect (DATABASE_URL yoki POSTGRES_PRIVATE_URL)"
   fi
 }
 
@@ -43,8 +46,8 @@ _await_db() {
 }
 
 _db_setup() {
-  if [ -z "${DATABASE_URL:-}" ]; then
-    echo "[railway] XATO: DATABASE_URL yo'q"
+  if ! _has_db_url; then
+    echo "[railway] XATO: Postgres URL yo'q (DATABASE_URL / POSTGRES_PRIVATE_URL)"
     exit 1
   fi
   _log_db_target
@@ -66,7 +69,7 @@ case "$CMD" in
     _db_setup
     ;;
   start)
-    if [ -n "${DATABASE_URL:-}" ]; then
+    if _has_db_url; then
       _log_db_target
       _await_db || exit 1
       echo "[railway] bootstrap (skip if ready)"
@@ -76,7 +79,7 @@ case "$CMD" in
       echo "[railway] seed_initial_db"
       "$PY" manage.py seed_initial_db
     else
-      echo "[railway] XATO: DATABASE_URL yo'q — Postgres → doniapp-back Connect"
+      echo "[railway] XATO: Postgres URL yo'q — Postgres → doniapp-back Connect"
       exit 1
     fi
     if [ ! -d staticfiles ] || [ -z "$(ls -A staticfiles 2>/dev/null || true)" ]; then
