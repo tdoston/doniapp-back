@@ -5,9 +5,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 resolve_py() {
-  if [ -x "$ROOT/.venv/bin/python" ]; then
-    echo "$ROOT/.venv/bin/python"
-  elif command -v python3 >/dev/null 2>&1; then
+  # Railpack: /app/.venv/bin/python
+  for candidate in "$ROOT/.venv/bin/python" "/app/.venv/bin/python"; do
+    if [ -x "$candidate" ]; then
+      echo "$candidate"
+      return
+    fi
+  done
+  if command -v python3 >/dev/null 2>&1; then
     echo "python3"
   else
     echo "python"
