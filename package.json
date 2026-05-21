@@ -15,6 +15,7 @@
     "railway:build": "bash scripts/railway.sh build",
     "railway:release": "bash scripts/railway.sh release",
     "railway:start": "bash scripts/railway.sh start",
+    "railway:check": "bash scripts/railway.sh release && bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py check'",
     "db:check": "bash -c 'exec \"${PYTHON:-./.venv/bin/python}\" manage.py check_db'"
   }
 }

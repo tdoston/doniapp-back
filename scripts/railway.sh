@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
-# Prod start = lokal `db:reset` oqimi (dropdb siz): bootstrap → migrate → seed → gunicorn
+# Railway: build | release (pre-deploy, DB) | start (migrate + gunicorn)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 resolve_py() {
-  # Railpack: /app/.venv/bin/python
   for candidate in "$ROOT/.venv/bin/python" "/app/.venv/bin/python"; do
     if [ -x "$candidate" ]; then
       echo "$candidate"
       return
     fi
   done
-  if command -v python3 >/dev/null 2>&1; then
-    echo "python3"
-  else
-    echo "python"
-  fi
+  command -v python3 >/dev/null 2>&1 && echo python3 || echo python
 }
 
 PY="$(resolve_py)"
@@ -30,13 +25,12 @@ _has_db_url() {
 _log_db_target() {
   "$PY" -c "
 from swiftbookings.db_railway import masked_db_target, resolve_database_url
-u = resolve_database_url()
-print('[railway] DB', masked_db_target(u) if u else 'MISSING', flush=True)
+print('[railway] DB', masked_db_target(resolve_database_url()), flush=True)
 "
 }
 
 _await_db() {
-  local n="${RAILWAY_DB_WAIT_ATTEMPTS:-12}"
+  local n="${RAILWAY_DB_WAIT_ATTEMPTS:-24}"
   local i=1
   while [ "$i" -le "$n" ]; do
     if "$PY" manage.py check_db 2>/dev/null; then
@@ -46,14 +40,14 @@ _await_db() {
     sleep 5
     i=$((i + 1))
   done
-  echo "[railway] XATO: Postgres ulanmadi — Railway Postgres Restart + Redeploy"
+  echo "[railway] XATO: Postgres ulanmadi"
   return 1
 }
 
-# Lokal `reset_local_db.sh` bilan bir xil (faqat dropdb yo'q)
-_db_setup_local_flow() {
+_db_release() {
   if ! _has_db_url; then
-    echo "[railway] XATO: DATABASE_URL / POSTGRES_PRIVATE_URL yo'q"
+    echo "[railway] XATO: DATABASE_URL yoki POSTGRES_PRIVATE_URL yo'q"
+    echo "  Railway: Postgres servisini doniapp-back ga Connect qiling"
     exit 1
   fi
   _log_db_target
@@ -64,15 +58,25 @@ _db_setup_local_flow() {
   "$PY" manage.py migrate --noinput
   echo "[railway] seed_initial_db"
   "$PY" manage.py seed_initial_db
+  echo "[railway] release OK"
 }
 
 case "$CMD" in
   build)
-    echo "[railway] collectstatic"
+    echo "[railway] collectstatic (PY=$PY)"
     "$PY" manage.py collectstatic --noinput
     ;;
+  release)
+    _db_release
+    ;;
   start)
-    _db_setup_local_flow
+    if _has_db_url; then
+      _log_db_target
+      echo "[railway] migrate (start)"
+      "$PY" manage.py migrate --noinput
+    else
+      echo "[railway] ogohlantirish: DB URL yo'q"
+    fi
     if [ ! -d staticfiles ] || [ -z "$(ls -A staticfiles 2>/dev/null || true)" ]; then
       "$PY" manage.py collectstatic --noinput
     fi
@@ -87,7 +91,7 @@ case "$CMD" in
       --error-logfile -
     ;;
   *)
-    echo "usage: $0 build|start" >&2
+    echo "usage: $0 build|release|start" >&2
     exit 1
     ;;
 esac

@@ -2,4 +2,4 @@
 PYTHONUNBUFFERED = "1"
 
 [start]
-cmd = "./scripts/railway.sh start"
+cmd = "bash scripts/railway.sh start"

@@ -1,9 +1,12 @@
-# doniapp-back — lokal dev bilan bir xil DB oqimi, keyin gunicorn
+# doniapp-back — Root: / (repo = django_backend)
 
 [build]
 buildCommand = "chmod +x scripts/railway.sh && bash scripts/railway.sh build"
 
 [deploy]
+# Pre-deploy / Release: DB (private network). Buildda DB yo'q.
+preDeployCommand = "bash scripts/railway.sh release"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 300
-startCommand = "chmod +x scripts/railway.sh && bash scripts/railway.sh start"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+startCommand = "bash scripts/railway.sh start"
