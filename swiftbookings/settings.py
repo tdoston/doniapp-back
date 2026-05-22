@@ -18,6 +18,9 @@ if _railway_public and _railway_public not in ALLOWED_HOSTS:
 # Railway default URL: *.up.railway.app (Django — boshidagi nuqta bilan barcha subdomain)
 if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() and ".up.railway.app" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(".up.railway.app")
+# Railway deploy healthcheck: Host: healthcheck.railway.app
+if os.environ.get("RAILWAY_ENVIRONMENT", "").strip() and "healthcheck.railway.app" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append("healthcheck.railway.app")
 
 from swiftbookings.db_railway import database_config_from_url, masked_db_target, resolve_database_url
 

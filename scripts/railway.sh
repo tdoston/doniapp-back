@@ -72,8 +72,14 @@ case "$CMD" in
   start)
     if _has_db_url; then
       _log_db_target
-      echo "[railway] migrate (start)"
-      "$PY" manage.py migrate --noinput
+      (
+        echo "[railway] migrate (fon)"
+        if _await_db; then
+          "$PY" manage.py migrate --noinput
+        else
+          echo "[railway] ogohlantirish: Postgres hali yo'q — API ishlaydi, db:false"
+        fi
+      ) &
     else
       echo "[railway] ogohlantirish: DB URL yo'q"
     fi
