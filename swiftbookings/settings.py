@@ -177,4 +177,5 @@ if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-    SECURE_SSL_REDIRECT = os.environ.get("DJANGO_SECURE_SSL_REDIRECT", "1") == "1"
+    # Railway: SSL edge da; ichki healthcheck HTTP — redirect 301 healthcheckni sindiradi
+    SECURE_SSL_REDIRECT = False
