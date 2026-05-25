@@ -126,6 +126,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8081",
     "http://127.0.0.1:8082",
     "http://localhost:8082",
+    "https://doniapp-front-production.up.railway.app",
 ]
 for _origin in os.environ.get("CORS_EXTRA_ORIGINS", "").split(","):
     _o = _normalize_origin(_origin)
@@ -162,6 +163,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:8081",
     "http://127.0.0.1:8082",
     "http://localhost:8082",
+    "https://doniapp-front-production.up.railway.app",
 ]
 for _origin in os.environ.get("CSRF_TRUSTED_EXTRA", "").split(","):
     _o = _normalize_origin(_origin)
