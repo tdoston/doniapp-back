@@ -2045,8 +2045,13 @@ def _bookings_patch(request, booking_id: uuid.UUID):
         sets.append("check_in_date = %s")
         vals.append(str(body["checkInDate"]))
     if "photos" in body and isinstance(body["photos"], list):
-        sets.append("photos = %s")
-        vals.append(json.dumps(body["photos"][:20]))
+        incoming_photos = [str(u) for u in body["photos"] if isinstance(u, str) and str(u).strip()][:20]
+        # Accidental empty photos (board list hydrate race) must not wipe stored images.
+        existing_photos = _parse_photos_field(cur_photos)
+        clear_photos = bool(body.get("clearPhotos") is True)
+        if incoming_photos or clear_photos or not existing_photos:
+            sets.append("photos = %s")
+            vals.append(json.dumps(incoming_photos))
     if "checkedInBy" in body:
         sets.append("checked_in_by = %s")
         vals.append(str(body["checkedInBy"])[:120])
