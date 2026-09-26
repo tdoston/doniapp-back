@@ -1311,7 +1311,6 @@ def board(request):
                    b.notes,
                    b.nights,
                    b.check_in_date AS check_in_date,
-                   b.photos,
                    b.created_at AS created_at,
                    COALESCE(b.booking_kind, 'check_in') AS booking_kind,
                    COALESCE(b.expected_arrival, '') AS expected_arrival
@@ -1326,28 +1325,17 @@ def board(request):
         )
         bookings = []
         for row in c.fetchall():
-            photos_raw = row[11]
-            if isinstance(photos_raw, list):
-                photos = photos_raw
-            elif isinstance(photos_raw, str):
-                try:
-                    j = json.loads(photos_raw)
-                    photos = j if isinstance(j, list) else []
-                except json.JSONDecodeError:
-                    photos = []
-            else:
-                photos = []
             cin = row[10]
             check_in_str = cin if isinstance(cin, str) else str(cin) if cin is not None else ""
-            created_raw = row[12]
+            created_raw = row[11]
             checked_in_at = (
                 str(created_raw).strip()
                 if created_raw is not None and str(created_raw).strip()
                 else ""
             )
-            kind_raw = str(row[13] or "").strip().lower()
+            kind_raw = str(row[12] or "").strip().lower()
             booking_kind = "bron" if kind_raw == "bron" else "check_in"
-            expected_arrival = str(row[14] or "").strip()
+            expected_arrival = str(row[13] or "").strip()
             bookings.append(
                 {
                     "roomCode": row[0],
@@ -1362,7 +1350,8 @@ def board(request):
                     "nights": row[9],
                     "checkInDate": check_in_str,
                     "checkedInAt": checked_in_at,
-                    "photos": photos,
+                    # List payload: photos only via GET /bookings/:id
+                    "photos": [],
                     "bookingKind": booking_kind,
                     "expectedArrival": expected_arrival,
                 }
@@ -2192,9 +2181,78 @@ def _bookings_delete(request, booking_id: uuid.UUID):
     return JsonResponse({"ok": True})
 
 
+def _parse_photos_field(photos_raw: Any) -> list[str]:
+    if isinstance(photos_raw, list):
+        photos = photos_raw
+    elif isinstance(photos_raw, str):
+        try:
+            j = json.loads(photos_raw)
+            photos = j if isinstance(j, list) else []
+        except json.JSONDecodeError:
+            photos = []
+    else:
+        photos = []
+    return [str(u) for u in photos if isinstance(u, str) and u.strip()][:20]
+
+
+def _bookings_get(_request, booking_id: uuid.UUID):
+    bid = str(booking_id)
+    with connection.cursor() as c:
+        ensure_guest_schema(c)
+        c.execute(
+            """
+            SELECT CAST(b.id AS TEXT), b.guest_name, b.guest_phone, b.checked_in_by,
+                   CAST(b.price AS TEXT), CAST(b.paid AS TEXT), b.notes, b.nights,
+                   b.check_in_date, b.photos, b.created_at,
+                   COALESCE(b.booking_kind, 'check_in'), COALESCE(b.expected_arrival, ''),
+                   r.code, b.bed_index, h.name, COALESCE(g.passport_series, '')
+            FROM bed_bookings b
+            JOIN rooms r ON r.id = b.room_id
+            JOIN hostels h ON h.id = r.hostel_id
+            LEFT JOIN guests g ON g.id = b.guest_id
+            WHERE b.id = %s AND b.status = 'active'
+            """,
+            [bid],
+        )
+        row = c.fetchone()
+    if not row:
+        return _json_error("Yozuv topilmadi yoki u allaqachon yopilgan.", 404)
+    kind_raw = str(row[11] or "").strip().lower()
+    cin = row[8]
+    check_in_str = cin if isinstance(cin, str) else str(cin) if cin is not None else ""
+    created_raw = row[10]
+    return JsonResponse(
+        {
+            "bookingId": row[0],
+            "guestName": row[1] or "",
+            "guestPhone": format_guest_contact(row[2] or ""),
+            "guestPassportSeries": str(row[16] or ""),
+            "checkedInBy": row[3] or "",
+            "price": _money_int_text(row[4]),
+            "paid": _money_int_text(row[5]),
+            "notes": row[6] or "",
+            "nights": row[7],
+            "checkInDate": check_in_str,
+            "photos": _parse_photos_field(row[9]),
+            "checkedInAt": (
+                str(created_raw).strip()
+                if created_raw is not None and str(created_raw).strip()
+                else ""
+            ),
+            "bookingKind": "bron" if kind_raw == "bron" else "check_in",
+            "expectedArrival": str(row[12] or "").strip(),
+            "roomCode": row[13],
+            "bedIndex": row[14],
+            "hostel": row[15] or "",
+        }
+    )
+
+
 @csrf_exempt
-@require_http_methods(["PATCH", "DELETE"])
+@require_http_methods(["GET", "PATCH", "DELETE"])
 def booking_detail(request, booking_id: uuid.UUID):
+    if request.method == "GET":
+        return _bookings_get(request, booking_id)
     if request.method == "PATCH":
         return _bookings_patch(request, booking_id)
     return _bookings_delete(request, booking_id)
@@ -2230,8 +2288,7 @@ def guests_recent(request):
                      WHEN latest.lk LIKE 'passport:%%' THEN substr(latest.lk, 10)
                      ELSE '' END
               ) AS out_pass,
-              latest.nights,
-              latest.booking_photos
+              latest.nights
             FROM (
               SELECT
                 COALESCE(
@@ -2252,7 +2309,6 @@ def guests_recent(request):
                 r.name AS room_name,
                 COALESCE(g.phone_normalized, '') AS g_phone,
                 COALESCE(g.passport_series, '') AS g_pass,
-                COALESCE(b.photos, '[]') AS booking_photos,
                 ROW_NUMBER() OVER (
                   PARTITION BY COALESCE(
                     g.identity_key,
@@ -2278,18 +2334,6 @@ def guests_recent(request):
         )
         guests = []
         for r in c.fetchall():
-            photos_raw = r[11]
-            if isinstance(photos_raw, list):
-                photos = photos_raw
-            elif isinstance(photos_raw, str):
-                try:
-                    j = json.loads(photos_raw)
-                    photos = j if isinstance(j, list) else []
-                except json.JSONDecodeError:
-                    photos = []
-            else:
-                photos = []
-            photos_out = [str(u) for u in photos if isinstance(u, str) and u.strip()][:3]
             guests.append(
                 {
                     "lookupKey": r[0] or "",
@@ -2303,7 +2347,8 @@ def guests_recent(request):
                     "hostel": r[6],
                     "room": r[7],
                     "nights": max(1, min(365, int(r[10] or 1))),
-                    "photos": photos_out,
+                    # List payload: photos only via booking detail
+                    "photos": [],
                 }
             )
     return JsonResponse({"guests": guests})
